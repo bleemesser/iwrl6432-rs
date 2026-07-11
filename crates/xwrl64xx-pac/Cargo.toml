@@ -8,6 +8,11 @@ description = "Owned PAC for the TI xWRL64xx, forked from abeanater/xwrl64xx-pac
 license = "MIT"
 repository = "https://github.com/abeanater/xwrl64xx-pac"
 
+# no_std target has no `test` crate; keep --all-targets (rust-analyzer flycheck) buildable
+[lib]
+test = false
+bench = false
+
 [dependencies]
 cortex-m = "0.7.3"
 vcell = "0.1.3"

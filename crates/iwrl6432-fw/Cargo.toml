@@ -4,6 +4,13 @@ version = "0.1.0"
 edition = "2024"
 description = "Pure-Rust firmware for the TI IWRL6432: radar bring-up + raw-ADC SPI streaming."
 
+# no_std target has no `test` crate; keep --all-targets (rust-analyzer flycheck) buildable
+[[bin]]
+name = "iwrl6432-fw"
+path = "src/main.rs"
+test = false
+bench = false
+
 [dependencies]
 cortex-m-rt = { version = "0.7.5", features = ["set-sp", "set-vtor"] }
 embassy-executor = { version = "0.10.0", features = ["platform-cortex-m", "executor-thread"] }
