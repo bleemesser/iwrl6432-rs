@@ -1,0 +1,108 @@
+// Tickless embassy-time driver on the RTI timer (0x56F7_F000): free-running
+// RTIFRC0 prescaled to 1 kHz off the 40 MHz OSC provides now(); the compare-0
+// interrupt (NVIC IRQ 43) fires only at the next scheduled wake-up. RTIFRC0
+// is 32-bit, so now() wraps after ~49.7 days (64-bit extension is future
+// work). Modelled on SDK TimerP_rti.c but one-shot rather than periodic.
+
+use core::cell::RefCell;
+use core::task::Waker;
+
+use critical_section::Mutex;
+use embassy_time_driver::Driver;
+use embassy_time_queue_utils::Queue;
+use xwrl64xx_pac::{self as pac, AppRti};
+
+use crate::clock;
+
+/// Must match the `embassy-time` `tick-hz-1_000` feature (1 tick = 1 ms).
+const TICKS_PER_SEC: u32 = 1000;
+/// Prescaler so `RTIFRC0` ticks at `TICKS_PER_SEC`: `rate = RTI_CLK / (RTICPUC0+1)`.
+const RTICPUC0: u32 = clock::RTI_CLK_HZ / TICKS_PER_SEC - 1;
+
+const COMP0: u32 = 1 << 0; // RTISETINT / RTICLEARINT / RTIINTFLAG compare-0 bit
+const CNT0EN: u32 = 1 << 0; // RTIGCTRL counter-0 enable
+
+#[inline]
+fn rti() -> &'static pac::app_rti::RegisterBlock {
+    unsafe { &*AppRti::PTR }
+}
+
+struct State {
+    queue: Queue,
+}
+
+struct RtiDriver {
+    state: Mutex<RefCell<State>>,
+}
+
+embassy_time_driver::time_driver_impl!(
+    static DRIVER: RtiDriver = RtiDriver {
+        state: Mutex::new(RefCell::new(State { queue: Queue::new() })),
+    }
+);
+
+impl RtiDriver {
+    /// Arm compare-0 for absolute tick `at`. Returns `false` if `at` is already
+    /// past (caller re-drains); `true` if armed, or if `at == u64::MAX` (disarm).
+    fn set_alarm(&self, at: u64) -> bool {
+        let r = rti();
+        if at == u64::MAX {
+            r.rticlearint().write(|w| unsafe { w.bits(COMP0) });
+            return true;
+        }
+        r.rticomp0().write(|w| unsafe { w.bits(at as u32) });
+        r.rtiintflag().write(|w| unsafe { w.bits(COMP0) }); // clear stale flag
+        r.rtisetint().write(|w| unsafe { w.bits(COMP0) });
+        self.now() < at // false if the deadline slipped past while programming
+    }
+}
+
+impl Driver for RtiDriver {
+    fn now(&self) -> u64 {
+        rti().rtifrc0().read().bits() as u64
+    }
+
+    fn schedule_wake(&self, at: u64, waker: &Waker) {
+        critical_section::with(|cs| {
+            let mut s = self.state.borrow(cs).borrow_mut();
+            if s.queue.schedule_wake(at, waker) {
+                let mut next = s.queue.next_expiration(self.now());
+                while !self.set_alarm(next) {
+                    next = s.queue.next_expiration(self.now());
+                }
+            }
+        });
+    }
+}
+
+/// Configure and start the tickless RTI timer. Call once, after clocks are up.
+pub fn init(dp: &pac::Peripherals) {
+    clock::enable_rti(dp);
+
+    let r = rti();
+    r.rtigctrl().write(|w| unsafe { w.bits(0) }); // stop
+    r.rtiuc0().write(|w| unsafe { w.bits(0) });
+    r.rtifrc0().write(|w| unsafe { w.bits(0) });
+    r.rticpuc0().write(|w| unsafe { w.bits(RTICPUC0) });
+    r.rticompctrl().write(|w| unsafe { w.bits(0) }); // COMP0 compares against FRC0
+    r.rtiudcp0().write(|w| unsafe { w.bits(0) }); // one-shot (no periodic auto-add)
+    r.rtiintflag().write(|w| unsafe { w.bits(0xF) });
+    r.rticlearint().write(|w| unsafe { w.bits(0xF) }); // no alarm armed yet
+
+    unsafe { cortex_m::peripheral::NVIC::unmask(pac::Interrupt::MUXED_APPSS_RTI1_RTI2_INT_REQ0) };
+
+    r.rtigctrl().modify(|rr, w| unsafe { w.bits(rr.bits() | CNT0EN) }); // start
+}
+
+/// RTI compare-0 handler (NVIC IRQ 43). Overrides the weak `device.x` alias.
+#[unsafe(no_mangle)]
+extern "C" fn MUXED_APPSS_RTI1_RTI2_INT_REQ0() {
+    rti().rtiintflag().write(|w| unsafe { w.bits(COMP0) }); // ack (write-1-to-clear)
+    critical_section::with(|cs| {
+        let mut s = DRIVER.state.borrow(cs).borrow_mut();
+        let mut next = s.queue.next_expiration(DRIVER.now());
+        while !DRIVER.set_alarm(next) {
+            next = s.queue.next_expiration(DRIVER.now());
+        }
+    });
+}
