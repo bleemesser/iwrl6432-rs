@@ -57,6 +57,21 @@ impl RtiDriver {
     }
 }
 
+/// Monotonic 40 MHz timestamp (25 ns ticks) from FRC0 (1 kHz) + the UC0
+/// prescale counter, for ISR-duration diagnostics (the M4's DWT CYCCNT is
+/// not implemented - DWT_CTRL.NOCYCCNT=1). Truncated to u32: wraps every
+/// ~107 s, fine for interval math.
+pub fn ticks_40mhz() -> u32 {
+    let r = rti();
+    loop {
+        let f1 = r.rtifrc0().read().bits();
+        let uc = r.rtiuc0().read().bits();
+        if r.rtifrc0().read().bits() == f1 {
+            return f1.wrapping_mul(RTICPUC0 + 1).wrapping_add(uc);
+        }
+    }
+}
+
 impl Driver for RtiDriver {
     fn now(&self) -> u64 {
         rti().rtifrc0().read().bits() as u64

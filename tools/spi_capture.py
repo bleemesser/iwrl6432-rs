@@ -8,11 +8,17 @@ strap and must stay unwired):
      each  magic (u16 BE) | len (u16 BE) | seq (u32 BE)  + len payload bytes
      (payload = RX0..RXn contiguous). The magic names the sample encoding:
        A5 5C  12-bit packed, 2 samples -> 3 bytes (see unpack12)
+       A5 5B  Bfp16 block floating point: 17-byte blocks of 1 shift
+              exponent + 16 int8 mantissas (see unpack_bfp), semi-lossless
        A5 6k  Sub12: k of every 16 sample pairs kept (random subsample for
               CS reconstruction), kept pairs 12-bit packed; pair indices are
               regenerated from seq (mask_indices, mirrors the firmware)
 
 Wiring: only MOSI (yellow), MISO (green), CS (brown), CLK (orange), GND (black).
+
+Clock ceiling: 20 MHz is the working maximum (default). 25 and 30 MHz fail
+outright (every status header bad, 0 chirps; sensor on the host, flying
+leads, tested 2026-07-11) - not marginal corruption, the slave never frames.
 
 Usage (deps come from the uv env in this directory):
   uv run spi_capture.py --seconds 5 [--out capture.bin] [--freq 15e6]
@@ -96,6 +102,7 @@ class SpiLink:
     def close(self):
         self.ftdi.close()
 CHIRP_MAGIC_PACKED12 = 0xA55C
+CHIRP_MAGIC_BFP16 = 0xA55B  # block floating point (see unpack_bfp)
 META_MAGIC = 0xA55E  # self-describing config descriptor (see parse_meta)
 SUB12_BLOCK_PAIRS = 16
 
@@ -107,6 +114,10 @@ def is_sub12(magic):
     return None
 
 
+def is_bfp(magic):
+    return magic == CHIRP_MAGIC_BFP16
+
+
 def is_meta(magic):
     return magic == META_MAGIC
 
@@ -114,6 +125,7 @@ def is_meta(magic):
 def valid_magic(magic):
     return (
         magic == CHIRP_MAGIC_PACKED12
+        or magic == CHIRP_MAGIC_BFP16
         or magic == META_MAGIC
         or is_sub12(magic) is not None
     )
@@ -131,7 +143,7 @@ META_FIELDS = (
 
 def parse_meta(payload):
     """Decode an A55E descriptor payload to a dict (see stream.rs build_meta).
-    format_code 0 = packed12, else Sub12 keep value."""
+    format_code 0 = packed12, 16 = bfp16, else Sub12 keep value."""
     return dict(zip(META_FIELDS, struct.unpack(META_STRUCT, payload)))
 
 
@@ -169,10 +181,21 @@ def unpack12(payload):
     return out
 
 
+def unpack_bfp(payload):
+    """Bfp16 -> int16 ndarray. 17-byte blocks: shift exponent (0..4) then
+    16 int8 mantissas; sample = mantissa << exponent (see capture.rs
+    pack_block_bfp)."""
+    b = np.frombuffer(bytes(payload), dtype=np.uint8)
+    b = b[: len(b) - len(b) % 17].reshape(-1, 17)
+    exp = b[:, :1].astype(np.int16)
+    mant = b[:, 1:].astype(np.int8).astype(np.int16)
+    return (mant << exp).ravel()
+
+
 def decode_payload(magic, payload):
     # Sub12 payloads are also 12-bit packed; index placement is up to the
     # consumer (see tools/cs_reconstruct.py).
-    return unpack12(payload)
+    return unpack_bfp(payload) if is_bfp(magic) else unpack12(payload)
 
 
 def main():
@@ -232,7 +255,8 @@ def main():
                 if args.stats and chirps < 3:
                     vals = decode_payload(m, batch[off + 8:off + 8 + ln])
                     k = is_sub12(m)
-                    fmt = "packed12" if k is None else f"sub12 {k}/16"
+                    fmt = ("bfp16" if is_bfp(m) else
+                           "packed12" if k is None else f"sub12 {k}/16")
                     print(f"  chirp seq={seq} len={ln} fmt={fmt} "
                           f"first8={vals[:8]} min={min(vals)} max={max(vals)}")
                 chirps += 1

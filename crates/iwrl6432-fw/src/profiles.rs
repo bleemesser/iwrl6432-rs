@@ -3,8 +3,10 @@
 //
 // All profiles share the plumbing: coarse resolution (RES_00,
 // 100 ns timing LSB, 16-bit freq words), 3 RX, both TX, continuous frames.
-// Capture is Packed12 when the profile fits the link, Sub12 (random
-// subsampling + host L1 reconstruction) when it would exceed it.
+// Capture format ladder: Packed12 (exact) when the profile fits the link;
+// Bfp16 (semi-lossless, 1.41x smaller) when within ~1.4x of it; Sub12
+// (random subsampling + host L1 reconstruction) only beyond that - L1
+// distorts amplitudes and the noise floor (see tools/cs_diagnostics.py).
 
 use iwrl6432_hal::sensor::{ChirpCommon, ChirpTiming, FrameCfg, RadarConfig, Resolution};
 
@@ -106,15 +108,20 @@ pub fn profiles() -> [Profile; 8] {
         // keep lower (fixed ring slot) and costs SNR.
         Profile {
             name: "imaging",
-            summary: "sub12 8/16 | 1024 samp, 3.3 GHz sweep, 4.6 cm bins",
-            detail: "First reconstruction tier: 4.6 cm bins from a 3.3 GHz sweep \
-                     at 50% subsampling (-3 dB SNR). 400 chirps/s, 25 fps.",
-            // 1024 @ 12.5M, 40.0 MHz/us, 90 us ramp; 2x8 @1 ms, 25 fps.
+            summary: "bfp16 | 1024 samp, 3.3 GHz sweep, 4.6 cm bins",
+            detail: "4.6 cm bins from a 3.3 GHz sweep, semi-lossless bfp16 \
+                     (~78 dB spectrum PSNR, no reconstruction needed): \
+                     1.31 MB/s wire at 400 chirps/s, 25 fps. Bursts at 3 ms \
+                     (v_max 0.41 m/s): the 1024-samp ADCBUF drain takes \
+                     ~1.1 ms wall time under SPI load, and tighter bursts \
+                     lose chirp IRQs / skip bursts (HW-verified; see the \
+                     status resync counter).",
+            // 1024 @ 12.5M, 40.0 MHz/us, 90 us ramp; 2x8 @3 ms, 25 fps.
             // Start ~58.4 GHz so the 3.3 GHz sweep stays in-band.
             cfg: {
-                let mut c = cfg(1024, 8, 1398, 900, 60, 2, 8, 10_000, 1_600_000);
+                let mut c = cfg(1024, 8, 1398, 900, 60, 2, 8, 30_000, 1_600_000);
                 c.timing.freq_start = 0xC2AA;
-                c.capture_format = iwrl6432_hal::capture::Format::Sub12(8);
+                c.capture_format = iwrl6432_hal::capture::Format::Bfp16;
                 c
             },
         },

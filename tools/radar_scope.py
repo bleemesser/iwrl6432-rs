@@ -31,6 +31,7 @@ import radar_vitals
 
 
 HIST = 200  # waterfall / spectrogram history depth (frames)
+NEAR_BIN = 3  # range bins near DC skipped for micro-Doppler peak-bin selection
 
 
 class Products:
@@ -62,6 +63,7 @@ class Reader(threading.Thread):
         self._ra_ema = None
         self.running = True
         self.denoise = False  # toggled by the scope's Denoise button
+        self.declutter = True  # display profile uses the MTI (static-removed) map
         self._prev_dets = set()  # last frame's (doppler, range) cells
         self._tracker = None  # radar_track.Tracker, rebuilt on fps change
         self._tracker_fps = None
@@ -295,9 +297,25 @@ class Reader(threading.Thread):
                        z=t.z, top=t.top, zext=t.zext, xyext=t.xyext,
                        posture=t.posture, fall=t.fall_frames > 0)
                   for t in self._tracker.update(pc)]
-        # range profile (dB) and its peak bin (for micro-Doppler)
-        rprof = 20 * np.log10(rd_np.max(axis=0) + 1e-6)
-        peak_bin = int(np.argmax(rprof))
+        # Micro-Doppler range bin: ALWAYS from the MTI range-Doppler map, which
+        # highlights movers. (Skip the first few bins - residual DC / antenna
+        # coupling near range 0 otherwise wins argmax and the spectrogram shows
+        # that clutter cell's noise instead of a mover.) This must NOT use the
+        # NN/mean display profile below: that averages over slow time, so movers
+        # cancel and the peak pins to static -> NN "breaks" the micro-Doppler.
+        mti_prof = np.asarray(to_np(rd_np)).max(axis=0)
+        peak_bin = int(np.argmax(mti_prof[NEAR_BIN:]) + NEAR_BIN)
+        # Range profile for DISPLAY (plot + waterfall). Declutter ON: the MTI
+        # profile (rd.max) - complex-domain static removal, so stationary
+        # reflectors (walls/furniture, e.g. the strong ~4 m returns) drop out
+        # and movers stay, no noise-floor amplification. Declutter OFF: the full
+        # static-inclusive profile (mean per-chirp magnitude).
+        if self.declutter:
+            disp_lin = mti_prof
+        else:
+            M = np.abs(np.stack([np.asarray(to_np(prof)) for _, prof in chirps]))
+            disp_lin = M.reshape(-1, M.shape[-1]).mean(axis=0)
+        rprof = 20 * np.log10(np.asarray(disp_lin, dtype=float) + 1e-6)
         peak_doppler = np.asarray(to_np(xp.abs(Xd[:, :, peak_bin]).sum(axis=0)))
         if self.denoise:
             peak_doppler = dsp.denoise_mag(peak_doppler, axis=0)
@@ -378,9 +396,15 @@ class Scope(QtWidgets.QWidget):
         self.btn_dn.setCheckable(True)
         self.btn_dn.toggled.connect(
             lambda on: setattr(self.reader, "denoise", bool(on)))
+        self.btn_dc = QtWidgets.QPushButton("Declutter")
+        self.btn_dc.setCheckable(True)
+        self.btn_dc.setChecked(self.reader.declutter)
+        self.btn_dc.toggled.connect(
+            lambda on: setattr(self.reader, "declutter", bool(on)))
         btn_3d = QtWidgets.QPushButton("3D view")
         btn_3d.clicked.connect(self._open_3d)
         bar.addWidget(self.btn_dn)
+        bar.addWidget(self.btn_dc)
         bar.addWidget(btn_3d)
         bar.addWidget(self.chk_auto)
         bar.addWidget(btn_cap)
@@ -792,7 +816,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cpu", action="store_true", help="force NumPy (no CuPy)")
     ap.add_argument("--replay", help="process a capture.bin instead of live FTDI")
-    ap.add_argument("--freq", type=float, default=15e6, help="SPI clock Hz")
+    ap.add_argument("--freq", type=float, default=20e6, help="SPI clock Hz")
     ap.add_argument("--iters", type=int, default=60, help="FISTA iters (Sub12)")
     ap.add_argument("--thresh-db", type=float, default=11.0, help="CFAR threshold")
     ap.add_argument("--ema", type=float, default=0.0,

@@ -82,6 +82,8 @@ pub fn start(cfg: &sensor::RadarConfig) -> Result<BringupReport, BringupError> {
         cfg.common.num_adc_samples,
         RX_MASK.count_ones() as usize,
         cfg.capture_format,
+        cfg.frame.chirps_per_burst,
+        cfg.frame.bursts_per_frame,
     );
 
     sensor::start(sensor::FrameTrigMode::SwImmediate);
@@ -117,6 +119,8 @@ pub fn reconfigure(cfg: &sensor::RadarConfig) -> Result<(), BringupError> {
         cfg.common.num_adc_samples,
         RX_MASK.count_ones() as usize,
         cfg.capture_format,
+        cfg.frame.chirps_per_burst,
+        cfg.frame.bursts_per_frame,
     );
     sensor::start(sensor::FrameTrigMode::SwImmediate);
     for _ in 0..200 {

@@ -27,13 +27,14 @@ import argparse
 import struct
 import sys
 
-from spi_capture import (SUB12_BLOCK_PAIRS, is_meta, is_sub12, mask_indices,
-                         unpack12, valid_magic)
+from spi_capture import (SUB12_BLOCK_PAIRS, is_bfp, is_meta, is_sub12,
+                         mask_indices, unpack12, unpack_bfp, valid_magic)
 
 
 def load_chunks(path):
-    """Yield (seq, keep_or_None, payload) per chirp. A55E config-descriptor
-    chunks are skipped (they are not sample data)."""
+    """Yield (seq, keep, payload) per chirp; keep is None (packed12), "bfp"
+    (bfp16, exact after dequantization) or the Sub12 kept-pair count. A55E
+    config-descriptor chunks are skipped (they are not sample data)."""
     data = open(path, "rb").read()
     off = 0
     while off + 8 <= len(data):
@@ -42,7 +43,7 @@ def load_chunks(path):
             print(f"bad chunk at offset {off}, stopping", file=sys.stderr)
             break
         if not is_meta(m):
-            yield seq, is_sub12(m), data[off + 8:off + 8 + ln]
+            yield seq, "bfp" if is_bfp(m) else is_sub12(m), data[off + 8:off + 8 + ln]
         off += 8 + ln
 
 
@@ -59,7 +60,13 @@ def fista(xp, y, idx, n, iters, lam_rel, group=None, debias=8):
     frame-shared support keeps the same bins in every chirp.
 
     debias: after the L1 loop, this many plain gradient steps restricted to
-    the recovered support - removes the shrinkage amplitude bias."""
+    the recovered support - removes the shrinkage amplitude bias.
+
+    Hermitian symmetry (y is real, so the true x is conjugate-symmetric) is
+    automatic, not enforced: a_op maps Hermitian spectra to real samples and
+    at_op maps real residuals back to Hermitian spectra, so every iterate
+    stays in the subspace to machine precision (verified ~5e-16). Projecting
+    each step would be a no-op."""
     scale = 1.0 / xp.sqrt(n)
 
     if idx.ndim == 1:
@@ -136,7 +143,9 @@ def main():
     for count, (seq, keep, payload) in enumerate(load_chunks(args.capture)):
         if args.max_chirps and count >= args.max_chirps:
             break
-        vals = unpack12(payload)
+        vals = unpack_bfp(payload) if keep == "bfp" else unpack12(payload)
+        if keep == "bfp":
+            keep = None  # exact after dequantization; treat like packed12
         per_rx = len(vals) // args.rx
         rx = xp.asarray(vals, dtype=float).reshape(args.rx, per_rx)
 

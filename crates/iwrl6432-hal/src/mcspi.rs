@@ -48,6 +48,10 @@ static EMPTY_HDR: [u32; 2] = [0x5AA5_0000, 0];
 
 static SERVED: AtomicU32 = AtomicU32::new(0);
 static EMPTY_POLLS: AtomicU32 = AtomicU32::new(0);
+/// Recognized polls since boot (any poll whose magic landed word-aligned in
+/// RX0). Freezes when the slave's word framing is desynced by a host that
+/// abandoned a transaction mid-cycle - the idle watchdog samples this.
+static POLLS: AtomicU32 = AtomicU32::new(0);
 /// Polls that arrived while a previous batch was still being pushed: the
 /// host gave up on it (read window passed); the batch is restarted.
 static RETRIES: AtomicU32 = AtomicU32::new(0);
@@ -183,6 +187,24 @@ pub fn force_idle() {
     spi.irqenable().write(|w| unsafe { w.bits(IRQ_RX_FULL) });
 }
 
+/// Recognized polls since boot (see `POLLS`). The stream task's idle watchdog
+/// samples this to detect a framing-desynced slave that will never see another
+/// poll and re-inits the channel.
+pub fn polls() -> u32 {
+    POLLS.load(Ordering::Relaxed)
+}
+
+/// Re-init the SPI slave channel back to poll-listening when it has gone quiet.
+/// Unlike [`force_idle`] (which recovers a *stalled in-flight push*), this is
+/// for the case where no push is outstanding but the slave's word framing is
+/// desynced (a host abandoned a transaction mid-cycle) so the ISR never
+/// recognizes another poll: reset_channel re-aligns the shift register to the
+/// next CS frame. Harmless when the port is merely idle (empty FIFOs). Caller
+/// must ensure no push is in flight ([`is_serving`] is false).
+pub fn resync() {
+    force_idle();
+}
+
 /// Completed (fully pushed) non-empty batches since boot.
 pub fn served() -> u32 {
     SERVED.load(Ordering::Relaxed)
@@ -256,6 +278,7 @@ extern "C" fn APPSS_SPI_IRQ_REQ() {
     }
 
     if poll {
+        POLLS.fetch_add(1, Ordering::Relaxed);
         // Answer right here. A poll while a push is outstanding means the
         // host abandoned that read; restart the same batch (still armed).
         if SERVING.load(Ordering::Relaxed) != NO_BUF {

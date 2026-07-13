@@ -6,7 +6,8 @@
 //   3. if total > 0, master reads `total` bytes: per-chirp chunks of
 //      magic(be16) | len(be16) | seq(be32) + payload (RX0..RX2). The magic
 //      names the sample encoding: A5 5C = 12-bit packed (2 samples -> 3
-//      bytes, capture::Format::Packed12); A5 6k = Sub12 with k of 16 pairs
+//      bytes, capture::Format::Packed12); A5 5B = Bfp16 (16-sample blocks,
+//      exponent byte + 16 int8 mantissas); A5 6k = Sub12 with k of 16 pairs
 //      kept (payload is the kept pairs Packed12-encoded; the host rebuilds
 //      the pair indices from seq, see capture::mask_fill).
 // Host tool: tools/spi_capture.py.
@@ -33,10 +34,20 @@ const META_PERIOD: Duration = Duration::from_millis(1000);
 /// never re-polled (e.g. the capture tool died): recover to poll-listening.
 const STALL_TIMEOUT: Duration = Duration::from_millis(100);
 
+/// No recognized poll for this long (with nothing being pushed) means the
+/// slave's word framing is desynced - a host abandoned a transaction mid-cycle
+/// so the poll magic no longer lands word-aligned and the ISR never sees
+/// another poll. The push-based STALL_TIMEOUT can't catch this (no push is in
+/// flight), so re-init the channel unconditionally. Well above the host's
+/// active poll gap (sub-ms..ms), so it only fires on a real wedge or a genuinely
+/// idle port (where the re-init is harmless).
+const IDLE_TIMEOUT: Duration = Duration::from_millis(300);
+
 fn chirp_magic() -> u8 {
     match capture::format() {
         capture::Format::Packed12 => 0x5C,
         capture::Format::Sub12(k) => 0x60 | k,
+        capture::Format::Bfp16 => 0x5B,
     }
 }
 
@@ -51,6 +62,7 @@ fn build_meta(tx: &mut [u32], nw: usize, cfg: &sensor::RadarConfig) -> usize {
     d[2] = match capture::format() {
         capture::Format::Packed12 => 0,
         capture::Format::Sub12(k) => k,
+        capture::Format::Bfp16 => 16,
     };
     d[3] = c.sample_rate_code;
     d[4..6].copy_from_slice(&(capture::num_samples() as u16).to_be_bytes());
@@ -83,6 +95,7 @@ pub async fn spi_stream() {
     let mut meta_deadline = Instant::now();
     let mut meta_gen = ring_gen.wrapping_sub(1); // force the first descriptor
     let mut stall = (0usize, Instant::now());
+    let mut idle = (mcspi::polls(), Instant::now());
     loop {
         // A reconfigure resets the ring; drop armed batches built for the old
         // profile (stale lengths/sequence numbers).
@@ -101,6 +114,17 @@ pub async fn spi_stream() {
         } else if now > stall.1 + STALL_TIMEOUT {
             mcspi::force_idle();
             stall = (0, now);
+        }
+
+        // Idle/wedge watchdog (see IDLE_TIMEOUT): if no poll has been recognized
+        // for a while and nothing is being pushed, re-init the slave channel so
+        // a framing-desynced port can self-heal instead of needing a reset.
+        let p = mcspi::polls();
+        if p != idle.0 {
+            idle = (p, now);
+        } else if !mcspi::is_serving() && now > idle.1 + IDLE_TIMEOUT {
+            mcspi::resync();
+            idle = (p, now);
         }
 
         if capture::pending() == 0 {

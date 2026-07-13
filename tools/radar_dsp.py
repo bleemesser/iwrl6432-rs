@@ -20,8 +20,9 @@ import struct
 
 import numpy as np
 
-from spi_capture import (SUB12_BLOCK_PAIRS, is_meta, is_sub12, mask_indices,
-                         parse_meta, unpack12, valid_magic)
+from spi_capture import (SUB12_BLOCK_PAIRS, is_bfp, is_meta, is_sub12,
+                         mask_indices, parse_meta, unpack12, unpack_bfp,
+                         valid_magic)
 from cs_reconstruct import fista
 
 C_LIGHT = 3.0e8
@@ -43,6 +44,14 @@ N_ROWS = 2
 N_COLS = 4
 AZ_ROW_VIRT = [0, 3, 2, 5]     # row-0 elements in col order 0..3
 EL_PAIRS = [(1, 3), (4, 2)]    # (row-1 virt, row-0 virt) at the same column
+# HW-measured static phase cal (walk test 2026-07-12): the TX1 virtual elements
+# read ~180 deg offset from TX0 (a boresight target measures [0,180,0,180]
+# across the 4 azimuth columns), so the azimuth FFT dumps a broadside target
+# into two +-90 deg edge blips and exaggerates every angle. Flip the TX1 azimuth
+# columns to realign the manifold. Applied to AZIMUTH ONLY - the elevation
+# interferometer pairs each mix one TX0 + one TX1 element and were tuned WITH
+# this offset (see EL_REVERSED), so a global flip would corrupt elevation.
+TX1_AZ_SIGN = -1.0
 
 AZ_FFT = 64
 EL_FFT = 16
@@ -76,7 +85,10 @@ class Config:
         self.raw = dict(meta)
         self.rx = meta["rx"]
         self.samples = meta["num_adc_samples"]
-        self.keep = None if meta["format_code"] == 0 else meta["format_code"]
+        # keep: None = exact packed12, "bfp" = bfp16 (also exact after
+        # dequantization), 1..15 = Sub12 kept pairs (needs L1 recon).
+        fc = meta["format_code"]
+        self.keep = None if fc == 0 else ("bfp" if fc == 16 else fc)
         self.sample_rate_code = meta["sample_rate_code"]
         self.chirps_per_burst = meta["chirps_per_burst"]
         self.bursts_per_frame = meta["bursts_per_frame"]
@@ -130,7 +142,8 @@ class Config:
 
     def __repr__(self):
         mo = "TDM-2TX" if self.mimo == 1 else ("BPM" if self.mimo == 4 else "1TX")
-        fmt = "packed12" if self.keep is None else f"sub12 {self.keep}/16"
+        fmt = ("packed12" if self.keep is None else
+               "bfp16" if self.keep == "bfp" else f"sub12 {self.keep}/16")
         return (f"Config({self.samples} samp, rx={self.rx}, {fmt}, {mo}, "
                 f"{self.chirps_per_burst}x{self.bursts_per_frame} bursts)")
 
@@ -146,10 +159,15 @@ def range_profiles(xp, seq, keep, payload, cfg, iters=60, lam=0.02):
     spectrum: for Sub12 the kept samples are windowed (w[idx]*y) and FISTA
     solves for fft(w*s) - the unwindowed spectrum's leakage skirts are not
     sparse and reconstruct incoherently across chirp masks."""
-    vals = unpack12(payload)
+    vals = unpack_bfp(payload) if keep == "bfp" else unpack12(payload)
     per_rx = len(vals) // cfg.rx
     rx = xp.asarray(vals, dtype=float).reshape(cfg.rx, per_rx)
-    if keep is None:
+    if keep is None or keep == "bfp":
+        # Per-chirp DC removal: the ADC carries a per-RX bias (tens of LSB on a
+        # ~60-LSB signal here) that otherwise dumps into range bin 0 and leaks
+        # into bins 1-2 through the window, swamping the near range and the
+        # micro-Doppler peak-bin pick. Subtract each chirp's fast-time mean.
+        rx = rx - rx.mean(axis=-1, keepdims=True)
         win = xp.hanning(per_rx)
         spec = xp.fft.fft(rx * win, axis=-1)
         return spec[:, : per_rx // 2]
@@ -175,11 +193,15 @@ def range_profiles_batch(xp, chirps, cfg, iters=60, lam=0.02):
     reconstructed in ONE batched FISTA call (per-row masks) - per-chirp calls
     cannot keep up with the live stream (see radar_scope.py)."""
     nc = len(chirps)
-    mats = np.stack([np.asarray(unpack12(p)).reshape(cfg.rx, -1)
+    dec = unpack_bfp if cfg.keep == "bfp" else unpack12
+    mats = np.stack([np.asarray(dec(p)).reshape(cfg.rx, -1)
                      for _, p in chirps])
     rx = xp.asarray(mats, dtype=float)          # [nc, rx, per_rx]
     per_rx = rx.shape[-1]
-    if cfg.keep is None:
+    if cfg.keep is None or cfg.keep == "bfp":
+        # Per-chirp DC removal (see range_profiles): kill the ADC bias before
+        # the range FFT so it doesn't pile into range bin 0.
+        rx = rx - rx.mean(axis=-1, keepdims=True)
         spec = xp.fft.fft(rx * xp.hanning(per_rx), axis=-1)
         return spec[..., : per_rx // 2]
     n = per_rx * SUB12_BLOCK_PAIRS // cfg.keep
@@ -284,7 +306,14 @@ def range_azimuth(xp, Xd):
     """Xd[vant, burst, N] -> RA[N, AZ_FFT] magnitude (the PPI arc). Azimuth FFT
     over the 4 row-0 elements, summed (non-coherent) over Doppler bins.
     Single-TX configs (3 vant) degrade to the 2 available row-0 elements."""
-    A = Xd[[v for v in AZ_ROW_VIRT if v < Xd.shape[0]]]
+    sel = [v for v in AZ_ROW_VIRT if v < Xd.shape[0]]
+    A = Xd[sel]
+    if Xd.shape[0] >= 4:                       # 2-TX TDMA: flip TX1 columns
+        A = A.copy()
+        half = Xd.shape[0] // 2
+        for i, v in enumerate(sel):
+            if v >= half:
+                A[i] = A[i] * TX1_AZ_SIGN
     sp = xp.fft.fftshift(xp.fft.fft(A, n=AZ_FFT, axis=0), axes=0)
     ra = xp.abs(sp).sum(axis=1)               # [AZ_FFT, N]
     if AZ_REVERSED:
@@ -308,9 +337,11 @@ def angle_2d(xp, vec6):
     mixes a TX0 and a TX1 element, so tdm_compensate must run first for
     movers. Tolerates fewer channels (single-TX: 2 az elements, no el pair)."""
     line = xp.zeros(N_COLS, dtype=complex)
+    half = len(vec6) // 2
     for col, v in enumerate(AZ_ROW_VIRT):
         if v < len(vec6):
-            line[col] = vec6[v]
+            # flip the TX1 azimuth elements (static 180 deg cal, see TX1_AZ_SIGN)
+            line[col] = vec6[v] * (TX1_AZ_SIGN if len(vec6) >= 4 and v >= half else 1.0)
     sp = xp.abs(xp.fft.fftshift(xp.fft.fft(line, n=AZ_FFT)))
     ai = int(xp.argmax(sp))
     # Parabolic peak interpolation: raw argmax quantizes azimuth to the
@@ -402,7 +433,8 @@ def detections_pointcloud(xp, Xd, dets, cfg):
 # ---------------------------------------------------------------------------
 
 def iter_chunks(data):
-    """Yield ('meta', dict) / ('chirp', seq, keep, payload) from a chunk blob."""
+    """Yield ('meta', dict) / ('chirp', seq, keep, payload) from a chunk blob.
+    keep: None = packed12, "bfp" = bfp16, 1..15 = Sub12 kept pairs."""
     off = 0
     while off + 8 <= len(data):
         m, ln, seq = struct.unpack(">HHI", data[off:off + 8])
@@ -412,7 +444,7 @@ def iter_chunks(data):
         if is_meta(m):
             yield "meta", parse_meta(body)
         else:
-            yield "chirp", seq, is_sub12(m), body
+            yield "chirp", seq, "bfp" if is_bfp(m) else is_sub12(m), body
         off += 8 + ln
 
 

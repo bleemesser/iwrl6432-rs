@@ -88,6 +88,16 @@ async fn dispatch(line: &str) {
         "stop" => stop(),
         "set" => set(arg1, arg2),
         "nvic" => nvic(),
+        "ct" => {
+            let (s, _) = capture::stats();
+            println!(
+                "chirp_cnt={} burst_cnt={} frame_cnt={} seen={}",
+                sensor::chirp_count(),
+                sensor::burst_count(),
+                sensor::frame_count(),
+                s,
+            );
+        }
         "" => {}
         _ => println!("unknown command '{}'; try 'help'", cmd),
     }
@@ -115,7 +125,8 @@ fn help() {
     println!("  burst     burst period, 100 ns per LSB");
     println!("  frame     frame period, 25 ns per LSB");
     println!("  txmask    TX enable mask (bit0 TX0, bit1 TX1)");
-    println!("  keep      pairs kept of every 16 (1..15 = CS subsample, 16 = exact)");
+    println!("  keep      encoding: 1..15 = CS subsample k/16, 16 = exact packed12,");
+    println!("            17 = bfp16 (block floating point, ~1.4x smaller, semi-lossless)");
 }
 
 fn list_profiles() {
@@ -189,21 +200,32 @@ fn show(arg: Option<&str>) {
             m.wire_bytes_per_sec / 1000,
             k,
         ),
+        capture::Format::Bfp16 => println!(
+            "  rate  : {} chirps/s | {:.0} fps | ~{} KB/s wire (bfp16, semi-lossless)",
+            m.chirps_per_sec,
+            m.fps,
+            m.wire_bytes_per_sec / 1000,
+        ),
     }
 }
 
 fn status() {
     let active = critical_section::with(|cs| ACTIVE.borrow(cs).get());
     let (seen, dropped) = capture::stats();
+    let (pack_cyc, queued) = capture::isr_timing();
     let f = fecss::rfs_fault_status();
     println!(
-        "{} (profile {}) | frames={} chirps seen={} drop={} oor={} | spi served={} empty={} retry={} starved={} | rfs=0x{:04x}{}",
+        "{} (profile {}) | frames={} chirps seen={} drop={} torn={} resync={} oor={} pack_us={} queued={} | spi served={} empty={} retry={} starved={} | rfs=0x{:04x}{}",
         if RUNNING.load(Ordering::Relaxed) { "running" } else { "stopped" },
         active,
         sensor::frame_count(),
         seen,
         dropped,
+        capture::torn(),
+        capture::resyncs(),
         capture::out_of_range(),
+        pack_cyc / 40,
+        queued,
         mcspi::served(),
         mcspi::empty_polls(),
         mcspi::retries(),
@@ -259,6 +281,7 @@ async fn start(arg: Option<&str>) {
     let pair_mod = match cfg.capture_format {
         capture::Format::Packed12 => 2,
         capture::Format::Sub12(_) => 32,
+        capture::Format::Bfp16 => 64,
     };
     if samples % pair_mod != 0 {
         println!("samples must be a multiple of {} for this format", pair_mod);
@@ -344,11 +367,11 @@ fn set(field: Option<&str>, val: Option<&str>) {
             true
         }
         "keep" => {
-            if (1..=16).contains(&v) {
-                cfg.capture_format = if v == 16 {
-                    capture::Format::Packed12
-                } else {
-                    capture::Format::Sub12(v as u8)
+            if (1..=17).contains(&v) {
+                cfg.capture_format = match v {
+                    16 => capture::Format::Packed12,
+                    17 => capture::Format::Bfp16,
+                    k => capture::Format::Sub12(k as u8),
                 };
                 true
             } else {
