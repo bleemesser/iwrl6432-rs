@@ -172,10 +172,16 @@ pub fn any_armed() -> bool {
     ARMED_LEN.iter().any(|a| a.load(Ordering::Acquire) != 0)
 }
 
-/// Recover from a host that stopped clocking mid-batch and never re-polled
-/// (e.g. the capture tool was killed): flush the channel and go back to
-/// poll-listening. The armed batch is kept and re-served on the next poll.
-/// Only call when [`push_progress`] has been stalled for a long time.
+/// Flush the channel and go back to poll-listening; `reset_channel` re-aligns
+/// the shift register to the next CS frame. The armed batch is kept and
+/// re-served on the next poll. Recovers both wedges the stream task watches
+/// for: a host that stopped clocking mid-batch and never re-polled (e.g. the
+/// capture tool was killed), and a slave whose word framing desynced after a
+/// host abandoned a transaction mid-cycle, so the poll magic no longer lands
+/// word-aligned and the ISR never recognizes another poll. Harmless when the
+/// port is merely idle (empty FIFOs), but it discards an in-flight push, so
+/// only call once [`push_progress`] has been stalled for a long time or
+/// [`is_serving`] is false.
 pub fn force_idle() {
     let spi = unsafe { &*pac::AppSpi0::PTR };
     spi.irqenable().write(|w| unsafe { w.bits(0) });
@@ -192,17 +198,6 @@ pub fn force_idle() {
 /// poll and re-inits the channel.
 pub fn polls() -> u32 {
     POLLS.load(Ordering::Relaxed)
-}
-
-/// Re-init the SPI slave channel back to poll-listening when it has gone quiet.
-/// Unlike [`force_idle`] (which recovers a *stalled in-flight push*), this is
-/// for the case where no push is outstanding but the slave's word framing is
-/// desynced (a host abandoned a transaction mid-cycle) so the ISR never
-/// recognizes another poll: reset_channel re-aligns the shift register to the
-/// next CS frame. Harmless when the port is merely idle (empty FIFOs). Caller
-/// must ensure no push is in flight ([`is_serving`] is false).
-pub fn resync() {
-    force_idle();
 }
 
 /// Completed (fully pushed) non-empty batches since boot.

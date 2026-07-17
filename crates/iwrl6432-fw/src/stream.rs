@@ -123,7 +123,7 @@ pub async fn spi_stream() {
         if p != idle.0 {
             idle = (p, now);
         } else if !mcspi::is_serving() && now > idle.1 + IDLE_TIMEOUT {
-            mcspi::resync();
+            mcspi::force_idle();
             idle = (p, now);
         }
 
