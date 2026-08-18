@@ -3,6 +3,7 @@ name = "iwrl6432-hal"
 version = "0.1.0"
 edition = "2024"
 description = "Hardware abstraction layer for the TI IWRL6432 (xWRL6432) Cortex-M4F mmWave radar. Wraps the owned xwrl64xx-pac with clock/pinmux/GPIO/UART/timer drivers and embedded-hal + Embassy traits."
+license = "MIT"
 
 # no_std target has no `test` crate; keep --all-targets (rust-analyzer flycheck) buildable
 [lib]

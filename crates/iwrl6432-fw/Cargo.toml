@@ -3,6 +3,7 @@ name = "iwrl6432-fw"
 version = "0.1.0"
 edition = "2024"
 description = "Pure-Rust firmware for the TI IWRL6432: radar bring-up + raw-ADC SPI streaming."
+license = "MIT"
 
 # no_std target has no `test` crate; keep --all-targets (rust-analyzer flycheck) buildable
 [[bin]]

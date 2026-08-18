@@ -172,3 +172,15 @@ uv run radar_scope.py --cpu           # force NumPy
 text detection dump (`uv run radar_dsp.py capture.bin`). Live Sub12 profiles
 want a GPU; on CPU they run best via `--replay` or the smaller Packed12 profiles
 stream in real time.
+
+## License
+
+MIT — see `LICENSE`.
+
+`crates/xwrl64xx-pac/` is derived from
+[`abeanater/xwrl64xx-pac`](https://github.com/abeanater/xwrl64xx-pac), also MIT;
+its upstream license is kept at `crates/xwrl64xx-pac/LICENSE`.
+
+No TI-licensed material is redistributed here. The files under `ti/` (SDK
+tooling, GEL scripts, the RFS patch binary, `ccs_base`) are fetched by the user
+from TI and are git-ignored; see the "TI files" section above.
