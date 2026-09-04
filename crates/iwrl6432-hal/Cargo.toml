@@ -1,0 +1,24 @@
+[package]
+name = "iwrl6432-hal"
+version = "0.1.0"
+edition = "2024"
+description = "Hardware abstraction layer for the TI IWRL6432 (xWRL6432) Cortex-M4F mmWave radar. Wraps the owned xwrl64xx-pac with clock/pinmux/GPIO/UART/timer drivers and embedded-hal + Embassy traits."
+license = "MIT"
+repository = "https://github.com/bleemesser/iwrl6432-rs"
+
+# no_std target has no `test` crate; keep --all-targets (rust-analyzer flycheck) buildable
+[lib]
+test = false
+bench = false
+
+[dependencies]
+cortex-m = { version = "0.7.7", features = ["critical-section-single-core"] }
+critical-section = "1.2.0"
+embassy-sync = "0.8.0"
+embassy-time-driver = "0.2.2"
+embassy-time-queue-utils = "0.3.2"
+embedded-hal = "1.0.0"
+embedded-io = "0.6.1"
+embedded-io-async = "0.6.1"
+heapless = "0.9.3"
+xwrl64xx-pac = { path = "../xwrl64xx-pac", features = ["rt"] }

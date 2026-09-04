@@ -1,0 +1,14 @@
+*target
+*-key
+*.pub
+__pycache__/
+.venv/
+/appimage/
+*.md
+!README.md
+/ti/**
+!/ti/README.md
+
+batchstatus.txt
+*.bin
+*.npy

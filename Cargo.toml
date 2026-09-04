@@ -1,0 +1,17 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/iwrl6432-fw",
+    "crates/iwrl6432-hal",
+    "crates/xwrl64xx-pac",
+]
+
+[profile.release]
+opt-level = "s"
+lto = true
+debug = true
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+panic = "abort"

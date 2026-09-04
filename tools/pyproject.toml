@@ -1,0 +1,24 @@
+[project]
+name = "iwrl6432-tools"
+version = "0.1.0"
+description = "Host-side tools for the IWRL6432 pure-Rust firmware: SPI capture + CS reconstruction"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.26",
+    "pyftdi>=0.55",
+    "scipy>=1.11",
+    "pyqtgraph>=0.13",
+    "PyQt6>=6.6",
+    "pyopengl>=3.1",  # radar_scope 3D view (pyqtgraph.opengl)
+]
+
+[project.optional-dependencies]
+# GPU FISTA reconstruction (cs_reconstruct.py --gpu). CUDA 12.x wheel; swap
+# for cupy-cuda11x etc. to match the machine. Use uv sync --extra gpu.
+# [ctk] ships the CUDA headers/runtime as pip wheels inside the venv, so
+# only the NVIDIA driver is needed on the machine (no system CUDA install).
+gpu = ["cupy-cuda12x[ctk]>=13"]
+
+[tool.uv]
+package = false

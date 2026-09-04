@@ -1,0 +1,7 @@
+# no_std firmware: the thumbv7em target has no `test` crate, so flycheck
+# must not pass --all-targets (which builds test harnesses).
+[cargo]
+allTargets = false
+
+[check]
+allTargets = false

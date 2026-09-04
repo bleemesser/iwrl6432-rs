@@ -1,0 +1,25 @@
+[package]
+name = "iwrl6432-fw"
+version = "0.1.0"
+edition = "2024"
+description = "Pure-Rust firmware for the TI IWRL6432: radar bring-up + raw-ADC SPI streaming."
+license = "MIT"
+repository = "https://github.com/bleemesser/iwrl6432-rs"
+
+# no_std target has no `test` crate; keep --all-targets (rust-analyzer flycheck) buildable
+[[bin]]
+name = "iwrl6432-fw"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+cortex-m-rt = { version = "0.7.5", features = ["set-sp", "set-vtor"] }
+embassy-executor = { version = "0.10.0", features = ["platform-cortex-m", "executor-thread"] }
+embassy-time = { version = "0.5.1", features = ["tick-hz-1_000"] }
+embassy-futures = "0.1"
+critical-section = "1"
+embedded-io-async = "0.6.1"
+iwrl6432-hal = { path = "../iwrl6432-hal" }
+panic-halt = "1.0.0"
+static_cell = "2.1.1"
