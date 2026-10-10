@@ -179,8 +179,18 @@ MIT — see `LICENSE`.
 
 `crates/xwrl64xx-pac/` is derived from
 [`abeanater/xwrl64xx-pac`](https://github.com/abeanater/xwrl64xx-pac), also MIT;
-its upstream license is kept at `crates/xwrl64xx-pac/LICENSE`.
+its upstream license is kept at `crates/xwrl64xx-pac/LICENSE`. Its interrupt
+vector table is derived from `cslr_intr.h` in the TI MMWAVE-L-SDK, which is
+BSD-3-Clause. TI's notice is kept at `crates/xwrl64xx-pac/LICENSE-TI`.
 
-No TI-licensed material is redistributed here. The files under `ti/` (SDK
-tooling, GEL scripts, the RFS patch binary, `ccs_base`) are fetched by the user
-from TI and are git-ignored; see the "TI files" section above.
+The register and mailbox sequences in this firmware were worked out by
+reading the BSD-3-Clause source of the MMWAVE-L-SDK and by comparing register
+state against TI's demo while it ran under JTAG. No TI code is copied into
+this repository. The RFS patch firmware is used as-is and was not
+disassembled or decompiled.
+
+The files under `ti/` (SDK tooling, GEL scripts, the RFS patch binary,
+`ccs_base`) are fetched by the user from TI and are git-ignored. See the
+"TI files" section above. A built `fw.appimage` contains the RFS patch, which
+is under TI's own license (use only with TI devices). Anyone who
+redistributes an appimage must include that license.

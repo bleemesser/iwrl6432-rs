@@ -7,6 +7,7 @@ svd2rust.
 
 Local changes on top of the upstream generation:
 - Real interrupt vector table (`Interrupt` enum, `__INTERRUPTS[64]`,
-  `device.x`), derived from SDK `cslr_intr.h`; enabled by the `rt` feature.
+  `device.x`), derived from SDK `cslr_intr.h` (BSD-3-Clause, see
+  LICENSE-TI). The `rt` feature enables it.
 - Generation inputs (SVD XML, sanitize script, single-file lib.rs) removed;
   regenerate from the upstream repo if ever needed.

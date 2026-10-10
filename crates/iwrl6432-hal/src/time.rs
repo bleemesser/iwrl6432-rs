@@ -1,9 +1,3 @@
-// Tickless embassy-time driver on the RTI timer (0x56F7_F000): free-running
-// RTIFRC0 prescaled to 1 kHz off the 40 MHz OSC provides now(); the compare-0
-// interrupt (NVIC IRQ 43) fires only at the next scheduled wake-up. RTIFRC0
-// is 32-bit, so now() wraps after ~49.7 days (64-bit extension is future
-// work). Modelled on SDK TimerP_rti.c but one-shot rather than periodic.
-
 use core::cell::RefCell;
 use core::task::Waker;
 
@@ -59,7 +53,7 @@ impl RtiDriver {
 
 /// Monotonic 40 MHz timestamp (25 ns ticks) from FRC0 (1 kHz) + the UC0
 /// prescale counter, for ISR-duration diagnostics (the M4's DWT CYCCNT is
-/// not implemented - DWT_CTRL.NOCYCCNT=1). Truncated to u32: wraps every
+/// not implemented, DWT_CTRL.NOCYCCNT=1). Truncated to u32: wraps every
 /// ~107 s, fine for interval math.
 pub fn ticks_40mhz() -> u32 {
     let r = rti();
@@ -106,7 +100,8 @@ pub fn init(dp: &pac::Peripherals) {
 
     unsafe { cortex_m::peripheral::NVIC::unmask(pac::Interrupt::MUXED_APPSS_RTI1_RTI2_INT_REQ0) };
 
-    r.rtigctrl().modify(|rr, w| unsafe { w.bits(rr.bits() | CNT0EN) }); // start
+    r.rtigctrl()
+        .modify(|rr, w| unsafe { w.bits(rr.bits() | CNT0EN) }); // start
 }
 
 /// RTI compare-0 handler (NVIC IRQ 43). Overrides the weak `device.x` alias.

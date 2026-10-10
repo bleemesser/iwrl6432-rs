@@ -1,9 +1,3 @@
-// Chirp profile + frame configuration + sensor start/stop, plus the ADCBUF.
-// Unlike the fecss mailbox flow this is almost all direct M4 register writes:
-// Chirp Timer (CT) 0x51000000, DFE RX config 0x51020004, Frame Timer (FT)
-// 0x5B000000, plus two plain RFS-RAM mirror writes the RFS reads for its
-// pre-frame analog setup. Recovered from SDK fe_sensdriver.c / fe_sensor.c.
-
 use cortex_m::asm;
 
 // Last config passed to [`configure`], for the self-describing stream metadata
@@ -87,8 +81,8 @@ fn rmw(addr: usize, clear: u32, set: u32) {
 }
 
 /// Timing/frequency resolution (CHIRP_TIMER_PROG_RESOLUTION). Sets the LSB of
-/// every timing field and the width of the frequency words. Note that
-/// [`FrameCfg::frame_periodicity`] is always in XTAL clocks regardless.
+/// every timing field and the width of the frequency words.
+/// [`FrameCfg::frame_periodicity`] is always in XTAL clocks.
 #[derive(Clone, Copy)]
 pub struct Resolution {
     /// Frequency word width: false = 16-bit, true = 24-bit.
@@ -182,9 +176,9 @@ impl Default for RadarConfig {
     fn default() -> Self {
         RadarConfig {
             resolution: Resolution {
-                // Low resolution on both, matching the whole TI stack: the SDK
-                // hardcodes RES_00 (100 ns / 16-bit freq) and the RFS has only
-                // ever seen that encoding of these CT registers.
+                // Coarse resolution on both: the SDK hardcodes RES_00 (100 ns,
+                // 16-bit freq words) and the RFS accepts only that encoding of
+                // these CT registers.
                 freq_high_res: false,
                 timing_high_res: false,
             },
@@ -193,12 +187,12 @@ impl Default for RadarConfig {
                 out_bits_sel: 0,     // 12-bit round
                 fir_sel: 0,          // long FIR
                 num_adc_samples: 256,
-                // TDMA-2TX like every preset (even chirp TX0, odd TX1): CLI
-                // `set` customs start from this default, and the host DSP
-                // needs the 6-ch virtual array the streamed meta promises.
+                // TDMA-2TX (even chirp TX0, odd TX1): customs built from this
+                // default inherit it, and the host DSP consumes the 6-element
+                // virtual array the streamed meta promises.
                 mimo_pattern: 1,
-                ramp_end_time: 400, // 40 us
-                rx_hpf_sel: 1,      // 350 kHz
+                ramp_end_time: 400,         // 40 us
+                rx_hpf_sel: 1,              // 350 kHz
                 hpf_fast_init_duration: 15, // 1.5 us
                 // mmw_cli formula: 2.1845 * (rampEnd_us * slope_MHz_us) / min(idle_us - 1, 6)
                 crd_nslope_mag: 38,
@@ -277,7 +271,7 @@ pub fn configure(cfg: &RadarConfig) -> Result<(), ConfigError> {
         cfg.resolution.freq_high_res as u32 | ((cfg.resolution.timing_high_res as u32) << 1),
     );
 
-    // Common: DFE RX cfg (sample rate[11:4], samples[23:12], FIR[25:24], bits[28:26]).
+    // DFE RX cfg (sample rate[11:4], samples[23:12], FIR[25:24], bits[28:26]).
     rmw(
         DFE_RX_CFG,
         0x1FFF_FFF0,
@@ -288,7 +282,11 @@ pub fn configure(cfg: &RadarConfig) -> Result<(), ConfigError> {
     );
     wr(CT_TX_MIMO_PATTERN, c.mimo_pattern as u32);
     wr(CT_RAMP_END_TIME, c.ramp_end_time as u32);
-    rmw(CT_HPF_FAST_INIT, 0xFF00, (c.hpf_fast_init_duration as u32) << 8);
+    rmw(
+        CT_HPF_FAST_INIT,
+        0xFF00,
+        (c.hpf_fast_init_duration as u32) << 8,
+    );
     let hpf_en = (c.misc_settings & 0x1) == 0;
     rmw(CT_MISC_SETTINGS, 1 << 3, (hpf_en as u32) << 3);
     rmw(CT_CRD_2, 0x7FFF, (c.crd_nslope_mag & 0x7FFF) as u32);
@@ -304,7 +302,6 @@ pub fn configure(cfg: &RadarConfig) -> Result<(), ConfigError> {
         wr(RFS_CHIRP_MIRROR + i * 4, 0);
     }
 
-    // Timing.
     wr(CT_IDLE_TIME, t.idle_time as u32);
     wr(
         CT_ADC_START_TIME,
@@ -318,7 +315,6 @@ pub fn configure(cfg: &RadarConfig) -> Result<(), ConfigError> {
         (t.tx_en as u32 & 0xF) | ((t.tx_bpm_en as u32 & 0xF) << 4),
     );
 
-    // Frame.
     wr(
         CT_NUM_CHIRPS_BURSTS,
         f.chirps_per_burst as u32 | ((f.bursts_per_frame as u32) << 16),
@@ -351,7 +347,10 @@ pub fn start(mode: FrameTrigMode) {
     wr(FT_TRIG_STOP_DONE, TRIG_STOP_CLEAR);
     wr(CT_TRIG_STOP_DONE, TRIG_STOP_CLEAR);
     wr(CT_TRIG, 0); // chirp timer is triggered by the frame timer
-    wr(CT_TRIG_MUX, matches!(mode, FrameTrigMode::HwLowPower | FrameTrigMode::HwLowJitter) as u32);
+    wr(
+        CT_TRIG_MUX,
+        matches!(mode, FrameTrigMode::HwLowPower | FrameTrigMode::HwLowJitter) as u32,
+    );
 
     let m = mode as u32 & 0x3;
     wr(FT_TRIGGERING, m);
@@ -453,7 +452,10 @@ pub fn adc_bytes_per_rx(num_adc_samples: u16) -> usize {
 /// `[`adc_bytes_per_rx`]. Call before [`start`].
 pub fn adcbuf_config(rx_mask: u16, num_adc_samples: u16) {
     let units = (adc_bytes_per_rx(num_adc_samples) / 16) as u32; // 16-B units
-    wr(ADCBUFCFG1, ADCBUFCFG1_RESET | (((rx_mask as u32) & 0xF) << 6));
+    wr(
+        ADCBUFCFG1,
+        ADCBUFCFG1_RESET | (((rx_mask as u32) & 0xF) << 6),
+    );
     wr(ADCBUFCFG2, units << 16); // ADDRX0 = 0, ADDRX1 = units
     wr(ADCBUFCFG3, (2 * units) | ((3 * units) << 16));
 }

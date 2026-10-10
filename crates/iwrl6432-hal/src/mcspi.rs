@@ -1,17 +1,3 @@
-// MCSPIA (APP_SPI_0, 0x53F7_F400) in peripheral (slave) mode: raw-data
-// streaming to an external SPI master on the BOOST J2 header (board switch
-// S1.6 ON routes pads AG/AH/AI/AJ there; the same mux steals GPIO5/USER_LED).
-// Config: slave, ch0, SPI mode 0, CS active-low, 32-bit words, RX on D1 /
-// TX on D0, TX FIFO enabled.
-//
-// The host-poll protocol is served entirely from the SPI ISR: batches are
-// double-buffered (the stream task builds one while the other is armed or
-// being clocked out), and the poll magic itself triggers channel reset +
-// FIFO prime in the ISR. Response latency is therefore a few tens of us and
-// independent of executor state - a task-level responder loses the race
-// with the host's post-poll read deadline whenever a batch rebuild or a
-// timer nap is in flight.
-
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use crate::pac;
@@ -19,7 +5,7 @@ use crate::pac;
 /// Poll magic the host master writes to request a batch.
 pub const CMD_POLL: u32 = 0xC0FF_EE01;
 
-/// Max words per batch (24.8 KB, 8 chirps of the largest 3032 B chunk).
+/// Max words per batch (24.8 KB, 7 chirps of the largest 3264 B chunk).
 /// Streaming is frame-paced: chirps arrive in per-frame clumps that the
 /// capture ring absorbs, and the link drains 2 batches per frame; RAM spent
 /// on ring slots (clump headroom) beats RAM spent on batch size.
@@ -50,14 +36,14 @@ static SERVED: AtomicU32 = AtomicU32::new(0);
 static EMPTY_POLLS: AtomicU32 = AtomicU32::new(0);
 /// Recognized polls since boot (any poll whose magic landed word-aligned in
 /// RX0). Freezes when the slave's word framing is desynced by a host that
-/// abandoned a transaction mid-cycle - the idle watchdog samples this.
+/// abandoned a transaction mid-cycle; the idle watchdog samples this.
 static POLLS: AtomicU32 = AtomicU32::new(0);
 /// Polls that arrived while a previous batch was still being pushed: the
 /// host gave up on it (read window passed); the batch is restarted.
 static RETRIES: AtomicU32 = AtomicU32::new(0);
 // Feed-ISR invocations that found the TX FIFO completely empty mid-push
 // (words still pending, not at prime): true starvation, the master may have
-// clocked garbage. The TX0_UNDERFLOW status latch is unusable for this - it
+// clocked garbage. The TX0_UNDERFLOW status latch is unusable for this: it
 // also sets benignly at end-of-transfer (shift-register preload after the
 // last word).
 static TX_STARVED: AtomicU32 = AtomicU32::new(0);
@@ -66,9 +52,8 @@ const IRQ_TX_EMPTY: u32 = 1 << 0;
 const IRQ_TX_UNDERFLOW: u32 = 1 << 1;
 const IRQ_RX_FULL: u32 = 1 << 2;
 
-/// Bring up MCSPIA as an SPI-mode-0 slave: clocks (inverted-gate convention,
-/// 40 MHz OSC /1), pads, soft reset, channel-0 config, interrupt priorities.
-/// Poll detection (RX interrupt) is live from here on.
+/// Bring up MCSPIA as an SPI-mode-0 slave (inverted-gate clock convention,
+/// 40 MHz OSC /1). Poll detection (RX interrupt) is live on return.
 pub fn init(dp: &pac::Peripherals) {
     dp.app_rcm
         .ipcfgclkgate1()
@@ -78,7 +63,7 @@ pub fn init(dp: &pac::Peripherals) {
         .modify(|r, w| unsafe { w.bits(r.bits() & !0x0FFF_FFFF) });
 
     // Pads, all function 0 = MCSPIA: AG=CLK, AI=MOSI, AJ=MISO, AH=CS0.
-    use crate::pinmux::{configure, pad_cfg, Pad};
+    use crate::pinmux::{Pad, configure, pad_cfg};
     configure(dp, Pad::Ag, pad_cfg(0));
     configure(dp, Pad::Ai, pad_cfg(0));
     configure(dp, Pad::Aj, pad_cfg(0));
@@ -94,14 +79,13 @@ pub fn init(dp: &pac::Peripherals) {
 
     // Ch0: mode 0, EPOL=1 (CS active low), WL=31 (32-bit), TRM=TX+RX,
     // DPE1=1 (TX on D0), IS=1 (RX on D1), FFEW=1 (TX FIFO).
-    spi.ch0conf().write(|w| unsafe {
-        w.bits((1 << 6) | (31 << 7) | (1 << 17) | (1 << 18) | (1 << 27))
-    });
+    spi.ch0conf()
+        .write(|w| unsafe { w.bits((1 << 6) | (31 << 7) | (1 << 17) | (1 << 18) | (1 << 27)) });
     // TX almost-empty trigger: TX0_EMPTY fires when the FIFO content drops
     // to <= AEL bytes. 31 = half-FIFO: 12.8 us of feed headroom at 20 MHz
     // (tx_starved() counts misses), and a low enough refill-IRQ rate
     // (~1/13 us during reads) that the chirp-copy ISR at prio 0x80 still
-    // meets the 136 us intra-burst chirp spacing - at AEL=47 the doubled
+    // meets the 136 us intra-burst chirp spacing; at AEL=47 the doubled
     // IRQ overhead made big-chirp profiles lose chirp interrupts.
     spi.xferlevel().write(|w| unsafe { w.bits(31) });
 
@@ -122,7 +106,7 @@ pub fn init(dp: &pac::Peripherals) {
 }
 
 /// The buffer the stream task should build the next batch into, if free.
-/// `None` while both halves are armed/serving - retry after a yield.
+/// `None` while both halves are armed/serving; retry after a yield.
 pub fn build_slot() -> Option<&'static mut [u32; TX_BUF_WORDS]> {
     let nb = NEXT_BUILD.load(Ordering::Relaxed);
     if ARMED_LEN[nb].load(Ordering::Acquire) == 0 && SERVING.load(Ordering::Acquire) != nb {
@@ -151,7 +135,11 @@ pub fn flush_armed() {
         }
     }
     NEXT_BUILD.store(
-        if s != NO_BUF { s ^ 1 } else { NEXT_SERVE.load(Ordering::Relaxed) },
+        if s != NO_BUF {
+            s ^ 1
+        } else {
+            NEXT_SERVE.load(Ordering::Relaxed)
+        },
         Ordering::Relaxed,
     );
 }
@@ -159,7 +147,10 @@ pub fn flush_armed() {
 /// `(pushed words, batch words)` of the in-flight push; equal when idle.
 /// The stream task's stall watchdog samples this.
 pub fn push_progress() -> (usize, usize) {
-    (TX_POS.load(Ordering::Relaxed), TX_LEN.load(Ordering::Relaxed))
+    (
+        TX_POS.load(Ordering::Relaxed),
+        TX_LEN.load(Ordering::Relaxed),
+    )
 }
 
 /// `true` while the ISR is pushing a real (non-empty-header) batch.
@@ -250,7 +241,8 @@ fn push(spi: &pac::app_spi_0::RegisterBlock) {
         }
         // Ack TX and any RX-full latched while pushing, then listen for the
         // next poll (RX events; the last <=64 B drain by themselves).
-        spi.irqstatus().write(|w| unsafe { w.bits(IRQ_TX_EMPTY | IRQ_RX_FULL) });
+        spi.irqstatus()
+            .write(|w| unsafe { w.bits(IRQ_TX_EMPTY | IRQ_RX_FULL) });
         spi.irqenable().write(|w| unsafe { w.bits(IRQ_RX_FULL) });
     } else {
         spi.irqstatus().write(|w| unsafe { w.bits(IRQ_TX_EMPTY) });
@@ -274,8 +266,8 @@ extern "C" fn APPSS_SPI_IRQ_REQ() {
 
     if poll {
         POLLS.fetch_add(1, Ordering::Relaxed);
-        // Answer right here. A poll while a push is outstanding means the
-        // host abandoned that read; restart the same batch (still armed).
+        // A poll while a push is outstanding means the host abandoned that
+        // read; restart the same batch (still armed).
         if SERVING.load(Ordering::Relaxed) != NO_BUF {
             RETRIES.fetch_add(1, Ordering::Relaxed);
         }
@@ -305,8 +297,11 @@ extern "C" fn APPSS_SPI_IRQ_REQ() {
         return;
     }
 
-    // TX refill. FIFO completely empty mid-push = the feed lost the race.
-    let (pos, len) = (TX_POS.load(Ordering::Relaxed), TX_LEN.load(Ordering::Relaxed));
+    // FIFO completely empty mid-push = the feed lost the race.
+    let (pos, len) = (
+        TX_POS.load(Ordering::Relaxed),
+        TX_LEN.load(Ordering::Relaxed),
+    );
     if pos > 0 && pos < len && spi.ch0stat().read().txffe().bit_is_set() {
         TX_STARVED.fetch_add(1, Ordering::Relaxed);
     }

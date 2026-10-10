@@ -1,8 +1,3 @@
-// FECSS (RF front-end sub-system) bring-up and the M4 <-> RFS-M3 mailbox.
-// Recovered from SDK fe_driver.c / rfs_driver.c. All raw 32-bit MMIO (the PAC
-// does not model these peripherals) with bounded busy-polls, so it runs before
-// the async executor. Call after clock::init_core.
-
 use cortex_m::asm;
 
 // Peripheral bases.
@@ -191,7 +186,12 @@ pub fn power_on() -> Result<(), PowerError> {
         return Err(PowerError::PowerDown);
     }
     rmw(FEC_PWR_REQ_PARAM, 0, PWR_WAKEUP_OUT);
-    if !wait_until(PSCON_FEC_PD_EN, PD_ON_STATUS_MASK, PD_ON_STATUS_UP, POLL_TRIES) {
+    if !wait_until(
+        PSCON_FEC_PD_EN,
+        PD_ON_STATUS_MASK,
+        PD_ON_STATUS_UP,
+        POLL_TRIES,
+    ) {
         return Err(PowerError::PowerUp);
     }
     asm::delay(CYC_300US);
@@ -430,7 +430,11 @@ pub fn temp_trig() -> Result<TempMeas, MailboxError> {
     let mut temp_c = [0i16; 10];
     for (i, t) in temp_c.iter_mut().enumerate() {
         let word = resp[1 + i / 2];
-        let half = if i % 2 == 0 { word & 0xFFFF } else { word >> 16 };
+        let half = if i % 2 == 0 {
+            word & 0xFFFF
+        } else {
+            word >> 16
+        };
         *t = half as i16;
     }
     Ok(TempMeas {
@@ -460,7 +464,10 @@ pub fn apll_clk_ctrl(dev_clk: u8, ft_clk: u8, apll: u8) -> Result<(), MailboxErr
         rmw(FEC_SYS_CLKCTL, 0x0000_FFF0, FEC_FCLK_SRCSEL << 4);
         rmw(RFS_BOOT_INFO, 0x0000_FFFF, RFS_CLK_FREQ_80M);
     }
-    wr(FRC_OSC_CLK_GATE, if ft_clk == FT_CLK_XTAL { 0 } else { 0x7 });
+    wr(
+        FRC_OSC_CLK_GATE,
+        if ft_clk == FT_CLK_XTAL { 0 } else { 0x7 },
+    );
     // T_RL_API_FECSS_DEV_CLK_CTRL_CMD (8 B).
     let payload = [
         dev_clk as u32 | ((ft_clk as u32) << 8) | ((apll as u32) << 16),

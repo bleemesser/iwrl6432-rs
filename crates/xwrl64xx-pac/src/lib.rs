@@ -92,69 +92,183 @@ pub union Vector {
 #[no_mangle]
 pub static __INTERRUPTS: [Vector; 64] = [
     Vector { _handler: WIC_IRQ },
-    Vector { _handler: APPSS_ESM_LO_IRQ },
-    Vector { _handler: FEC_INTR0 },
-    Vector { _handler: FEC_INTR1 },
-    Vector { _handler: FEC_INTR2 },
-    Vector { _handler: FEC_INTR3 },
-    Vector { _handler: APPSS_GIO_INT0 },
-    Vector { _handler: APPSS_GIO_INT1 },
-    Vector { _handler: APPSS_SCI1_INT0 },
-    Vector { _handler: APPSS_SCI1_INT1 },
-    Vector { _handler: APPSS_LIN_INT0 },
-    Vector { _handler: APPSS_LIN_INT1 },
-    Vector { _handler: APPSS_DCC_DONE_INT },
-    Vector { _handler: APPSS_QSPI_INTR_REQ },
-    Vector { _handler: APPSS_SPI_IRQ_REQ },
-    Vector { _handler: APPSS_TPCC1_INTAGG },
-    Vector { _handler: APPSS_TPCC1_ERRAGG },
-    Vector { _handler: APPSS_TPCC2_INTAGG },
-    Vector { _handler: APPSS_TPCC2_ERRAGG },
-    Vector { _handler: APPSS_I2C_INT },
-    Vector { _handler: APPSS_MCRC_INT },
-    Vector { _handler: APPSS_MCAN_INT0 },
-    Vector { _handler: APPSS_MCAN_INT1 },
-    Vector { _handler: APPSS_MCAN_FE_INT1 },
-    Vector { _handler: APPSS_MCAN_FE_INT2 },
-    Vector { _handler: APPSS_MCAN_FE_INT3 },
-    Vector { _handler: APPSS_MCAN_FE_INT4 },
-    Vector { _handler: APPSS_MCAN_FE_INT5 },
-    Vector { _handler: APPSS_MCAN_FE_INT6_AND_SPI2_IRQ_REQ },
-    Vector { _handler: MUXED_APPSS_MCAN_FE_INT7_AND_DEBUGSS_TXDATA_AVAIL },
-    Vector { _handler: MUXED_FECSS_CHIRPTIMER_CHIRP_START_AND_CHIRP_END },
-    Vector { _handler: MUXED_FECSS_CHIRPTIMER_BURST_START_AND_BURST_END },
-    Vector { _handler: FECSS_CHIRPTIMER_FRAME_END },
-    Vector { _handler: FECSS_FRAMETIMER_FRAME_START },
-    Vector { _handler: MUXED_FECSS_CHIRP_AVAIL_IRQ_AND_ADC_VALID_START_AND_SYNC_IN },
-    Vector { _handler: MUXED_FECSS_FRAME_START_OFFSET_INTR_TIME1 },
-    Vector { _handler: FECSS_FRAME_START_OFFSET_INTR_TIME2 },
-    Vector { _handler: FECSS_FRAME_START_OFFSET_INTR_TIME3 },
-    Vector { _handler: FECSS_BURST_START_OFFSET_TIME },
+    Vector {
+        _handler: APPSS_ESM_LO_IRQ,
+    },
+    Vector {
+        _handler: FEC_INTR0,
+    },
+    Vector {
+        _handler: FEC_INTR1,
+    },
+    Vector {
+        _handler: FEC_INTR2,
+    },
+    Vector {
+        _handler: FEC_INTR3,
+    },
+    Vector {
+        _handler: APPSS_GIO_INT0,
+    },
+    Vector {
+        _handler: APPSS_GIO_INT1,
+    },
+    Vector {
+        _handler: APPSS_SCI1_INT0,
+    },
+    Vector {
+        _handler: APPSS_SCI1_INT1,
+    },
+    Vector {
+        _handler: APPSS_LIN_INT0,
+    },
+    Vector {
+        _handler: APPSS_LIN_INT1,
+    },
+    Vector {
+        _handler: APPSS_DCC_DONE_INT,
+    },
+    Vector {
+        _handler: APPSS_QSPI_INTR_REQ,
+    },
+    Vector {
+        _handler: APPSS_SPI_IRQ_REQ,
+    },
+    Vector {
+        _handler: APPSS_TPCC1_INTAGG,
+    },
+    Vector {
+        _handler: APPSS_TPCC1_ERRAGG,
+    },
+    Vector {
+        _handler: APPSS_TPCC2_INTAGG,
+    },
+    Vector {
+        _handler: APPSS_TPCC2_ERRAGG,
+    },
+    Vector {
+        _handler: APPSS_I2C_INT,
+    },
+    Vector {
+        _handler: APPSS_MCRC_INT,
+    },
+    Vector {
+        _handler: APPSS_MCAN_INT0,
+    },
+    Vector {
+        _handler: APPSS_MCAN_INT1,
+    },
+    Vector {
+        _handler: APPSS_MCAN_FE_INT1,
+    },
+    Vector {
+        _handler: APPSS_MCAN_FE_INT2,
+    },
+    Vector {
+        _handler: APPSS_MCAN_FE_INT3,
+    },
+    Vector {
+        _handler: APPSS_MCAN_FE_INT4,
+    },
+    Vector {
+        _handler: APPSS_MCAN_FE_INT5,
+    },
+    Vector {
+        _handler: APPSS_MCAN_FE_INT6_AND_SPI2_IRQ_REQ,
+    },
+    Vector {
+        _handler: MUXED_APPSS_MCAN_FE_INT7_AND_DEBUGSS_TXDATA_AVAIL,
+    },
+    Vector {
+        _handler: MUXED_FECSS_CHIRPTIMER_CHIRP_START_AND_CHIRP_END,
+    },
+    Vector {
+        _handler: MUXED_FECSS_CHIRPTIMER_BURST_START_AND_BURST_END,
+    },
+    Vector {
+        _handler: FECSS_CHIRPTIMER_FRAME_END,
+    },
+    Vector {
+        _handler: FECSS_FRAMETIMER_FRAME_START,
+    },
+    Vector {
+        _handler: MUXED_FECSS_CHIRP_AVAIL_IRQ_AND_ADC_VALID_START_AND_SYNC_IN,
+    },
+    Vector {
+        _handler: MUXED_FECSS_FRAME_START_OFFSET_INTR_TIME1,
+    },
+    Vector {
+        _handler: FECSS_FRAME_START_OFFSET_INTR_TIME2,
+    },
+    Vector {
+        _handler: FECSS_FRAME_START_OFFSET_INTR_TIME3,
+    },
+    Vector {
+        _handler: FECSS_BURST_START_OFFSET_TIME,
+    },
     Vector { _handler: SW_IRQ0 },
     Vector { _handler: SW_IRQ1 },
     Vector { _handler: SW_IRQ2 },
     Vector { _handler: SW_IRQ3 },
-    Vector { _handler: MUXED_APPSS_RTI1_RTI2_INT_REQ0 },
-    Vector { _handler: MUXED_APPSS_RTI1_RTI2_INT_REQ1 },
-    Vector { _handler: MUXED_APPSS_RTI1_RTI2_INT_REQ2 },
-    Vector { _handler: MUXED_APPSS_RTI1_RTI2_INT_REQ3 },
-    Vector { _handler: MUXED_APPSS_RTI1_RTI2_TBINT_AND_GPADC_IFM_DONE },
-    Vector { _handler: MUXED_APPSS_RTI1_CAP_EVT0_AND_RTI2_CAP_EVT0_AND_PWM_INT0 },
-    Vector { _handler: MUXED_APPSS_RTI1_CAP_EVT1_AND_RTI2_CAP_EVT1_AND_PWM_INT1 },
-    Vector { _handler: HWASS_LOOP_INT },
-    Vector { _handler: HWASS_PARAMDONE_INT },
-    Vector { _handler: SHA_S_INT },
-    Vector { _handler: SHA_P_INT },
+    Vector {
+        _handler: MUXED_APPSS_RTI1_RTI2_INT_REQ0,
+    },
+    Vector {
+        _handler: MUXED_APPSS_RTI1_RTI2_INT_REQ1,
+    },
+    Vector {
+        _handler: MUXED_APPSS_RTI1_RTI2_INT_REQ2,
+    },
+    Vector {
+        _handler: MUXED_APPSS_RTI1_RTI2_INT_REQ3,
+    },
+    Vector {
+        _handler: MUXED_APPSS_RTI1_RTI2_TBINT_AND_GPADC_IFM_DONE,
+    },
+    Vector {
+        _handler: MUXED_APPSS_RTI1_CAP_EVT0_AND_RTI2_CAP_EVT0_AND_PWM_INT0,
+    },
+    Vector {
+        _handler: MUXED_APPSS_RTI1_CAP_EVT1_AND_RTI2_CAP_EVT1_AND_PWM_INT1,
+    },
+    Vector {
+        _handler: HWASS_LOOP_INT,
+    },
+    Vector {
+        _handler: HWASS_PARAMDONE_INT,
+    },
+    Vector {
+        _handler: SHA_S_INT,
+    },
+    Vector {
+        _handler: SHA_P_INT,
+    },
     Vector { _handler: TRNG_INT },
     Vector { _handler: PKAE_INT },
-    Vector { _handler: AES_S_INT },
-    Vector { _handler: AES_P_INT },
-    Vector { _handler: HSM_MB_INT0 },
-    Vector { _handler: HSM_MB_INT1 },
-    Vector { _handler: APPSS_MUXED_PERIPH_ACCESS_ERRAGG },
-    Vector { _handler: APPSS_WKUP_INTR },
-    Vector { _handler: APPSS_SCI2_INT0 },
-    Vector { _handler: APPSS_SCI2_INT1 },
+    Vector {
+        _handler: AES_S_INT,
+    },
+    Vector {
+        _handler: AES_P_INT,
+    },
+    Vector {
+        _handler: HSM_MB_INT0,
+    },
+    Vector {
+        _handler: HSM_MB_INT1,
+    },
+    Vector {
+        _handler: APPSS_MUXED_PERIPH_ACCESS_ERRAGG,
+    },
+    Vector {
+        _handler: APPSS_WKUP_INTR,
+    },
+    Vector {
+        _handler: APPSS_SCI2_INT0,
+    },
+    Vector {
+        _handler: APPSS_SCI2_INT1,
+    },
 ];
 #[doc = r"Enumeration of all the interrupts."]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

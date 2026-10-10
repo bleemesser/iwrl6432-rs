@@ -1,7 +1,3 @@
-// Line-based CLI on the UARTB console. Profiles can be listed, inspected
-// (with derived metrics), started, stopped and reconfigured live; `set`
-// edits a staged custom config that `start custom` runs.
-
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use embassy_time::Timer;
@@ -216,7 +212,11 @@ fn status() {
     let f = fecss::rfs_fault_status();
     println!(
         "{} (profile {}) | frames={} chirps seen={} drop={} torn={} resync={} oor={} pack_us={} queued={} | spi served={} empty={} retry={} starved={} | rfs=0x{:04x}{}",
-        if RUNNING.load(Ordering::Relaxed) { "running" } else { "stopped" },
+        if RUNNING.load(Ordering::Relaxed) {
+            "running"
+        } else {
+            "stopped"
+        },
         active,
         sensor::frame_count(),
         seen,
@@ -264,7 +264,14 @@ fn log_cmd(arg: Option<&str>) {
             return;
         }
     }
-    println!("log {}", if LOG.load(Ordering::Relaxed) { "on" } else { "off" });
+    println!(
+        "log {}",
+        if LOG.load(Ordering::Relaxed) {
+            "on"
+        } else {
+            "off"
+        }
+    );
 }
 
 async fn start(arg: Option<&str>) {
@@ -391,7 +398,11 @@ fn set(field: Option<&str>, val: Option<&str>) {
     let ramp_us = cfg.common.ramp_end_time as f32 / 10.0;
     let slope_mhz = cfg.timing.freq_slope as f32 * 0.02861;
     let idle_us = cfg.timing.idle_time as f32 / 10.0;
-    let div = if idle_us - 1.0 < 6.0 { idle_us - 1.0 } else { 6.0 };
+    let div = if idle_us - 1.0 < 6.0 {
+        idle_us - 1.0
+    } else {
+        6.0
+    };
     if div > 0.0 {
         cfg.common.crd_nslope_mag = (2.1845 * ramp_us * slope_mhz / div) as u16;
     }

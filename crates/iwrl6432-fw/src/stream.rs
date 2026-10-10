@@ -1,28 +1,10 @@
-// Raw-ADC streaming out the MCSPIA slave port, host-polled (no handshake
-// GPIO: J2 pin 6 / HOST_INTR sits on the SYNC_OUT boot strap and must stay
-// unwired). Protocol, all big-endian-packed words so wire bytes == memory:
-//   1. master writes the 4-byte poll magic 0xC0FFEE01
-//   2. master reads the status header  5A A5 | total(be16) | first_seq(be32)
-//   3. if total > 0, master reads `total` bytes: per-chirp chunks of
-//      magic(be16) | len(be16) | seq(be32) + payload (RX0..RX2). The magic
-//      names the sample encoding: A5 5C = 12-bit packed (2 samples -> 3
-//      bytes, capture::Format::Packed12); A5 5B = Bfp16 (16-sample blocks,
-//      exponent byte + 16 int8 mantissas); A5 6k = Sub12 with k of 16 pairs
-//      kept (payload is the kept pairs Packed12-encoded; the host rebuilds
-//      the pair indices from seq, see capture::mask_fill).
-// Host tool: tools/spi_capture.py.
-//
-// Polls are answered by the SPI ISR from a double buffer (see hal::mcspi);
-// this task only builds batches into free halves and arms them, so batch
-// building never sits in the poll-response path.
-
 use embassy_time::{Duration, Instant};
 use iwrl6432_hal::{capture, mcspi, sensor};
 
 /// Config-descriptor chunk magic (`A5 5E`), distinct from the sample chunks
-/// (`A5 5C` packed12 / `A5 6k` sub12) and the status header (`5A A5`). Lets the
-/// host self-describe: sample count, RX, format and every RF param needed for
-/// physical axes + the MIMO layout. See tools/radar_scope.py.
+/// (`A5 5C` packed12 / `A5 6k` sub12) and the status header (`5A A5`). Carries
+/// sample count, RX, format and every RF param the host needs for the physical
+/// axes and MIMO layout. See tools/radar_scope.py.
 const META_MAGIC: u8 = 0x5E;
 /// Descriptor payload length (bytes); whole SPI words. Layout mirrored by the
 /// host `struct.unpack(">BBBBHHHBBhHHxxIII", ...)`.
@@ -35,7 +17,7 @@ const META_PERIOD: Duration = Duration::from_millis(1000);
 const STALL_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// No recognized poll for this long (with nothing being pushed) means the
-/// slave's word framing is desynced - a host abandoned a transaction mid-cycle
+/// slave's word framing is desynced: a host abandoned a transaction mid-cycle
 /// so the poll magic no longer lands word-aligned and the ISR never sees
 /// another poll. The push-based STALL_TIMEOUT can't catch this (no push is in
 /// flight), so re-init the channel unconditionally. Well above the host's
@@ -131,7 +113,7 @@ pub async fn spi_stream() {
             embassy_futures::yield_now().await;
             continue;
         }
-        // Build as LATE as possible so batches carry a full host cycle of
+        // Build as late as possible so batches carry a full host cycle of
         // chirps: an armed batch cannot grow, and arming eagerly locks the
         // batch size to a few chirps (which wastes the host's fixed ~ms
         // per-poll USB cost on tiny reads). Build when:
@@ -170,7 +152,9 @@ pub async fn spi_stream() {
 
         let magic = chirp_magic();
         for i in 0.. {
-            let Some(c) = capture::pop_chirp(&mut buf) else { break };
+            let Some(c) = capture::pop_chirp(&mut buf) else {
+                break;
+            };
             if i == 0 {
                 first_seq = c.seq;
             }

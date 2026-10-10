@@ -1,10 +1,4 @@
-// Continuous raw-ADC capture: the DFE writes each chirp into the ADCBUF's
-// ping/pong halves (alternating per chirp) and pulses NVIC IRQ 34. The ISR
-// here copies the finished half into a static ring; a consumer pops whole
-// chirps. Ping/pong is selected by chirp parity (chirp 0 of a burst = ping),
-// so `chirps_per_burst` must be EVEN for parity to hold across bursts.
-
-use core::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicU32, AtomicUsize, Ordering};
 
 use embassy_sync::waitqueue::AtomicWaker;
 
@@ -32,7 +26,7 @@ pub enum Format {
 }
 
 /// Mask granularity for [`Format::Sub12`]: pairs are drawn per block of
-/// this many (stratified, so kept samples never cluster badly).
+/// this many, so kept samples stay spread across the chirp.
 pub const SUB12_BLOCK_PAIRS: usize = 16;
 
 /// Ring capacity in chirps. 19 x 3264 B = 62 KB of APPSS RAM (RAM3 is
@@ -117,8 +111,14 @@ struct Ring {
 
 impl Ring {
     const fn new() -> Self {
-        const EMPTY: Slot = Slot { seq: 0, len: 0, data: [0; MAX_CHIRP_BYTES] };
-        Ring { slots: [EMPTY; RING_CHIRPS] }
+        const EMPTY: Slot = Slot {
+            seq: 0,
+            len: 0,
+            data: [0; MAX_CHIRP_BYTES],
+        };
+        Ring {
+            slots: [EMPTY; RING_CHIRPS],
+        }
     }
 }
 
@@ -161,7 +161,7 @@ pub fn init(
             k
         }
         Format::Bfp16 => {
-            // %64: whole 16-sample blocks AND per-RX payload a multiple of
+            // %64: whole 16-sample blocks and per-RX payload a multiple of
             // 4 B (17 B/block, so blocks must divide by 4).
             assert!(num_adc_samples % 64 == 0, "Bfp16 needs samples % 64 == 0");
             FORMAT_BFP16
@@ -197,7 +197,10 @@ pub fn init(
 
 /// `(chirps seen, chirps dropped)` since [`init`].
 pub fn stats() -> (u32, u32) {
-    (SEEN.load(Ordering::Relaxed), DROPPED.load(Ordering::Relaxed))
+    (
+        SEEN.load(Ordering::Relaxed),
+        DROPPED.load(Ordering::Relaxed),
+    )
 }
 
 /// Samples that did not fit 12 bits during [`Format::Packed12`] packing.
@@ -365,7 +368,7 @@ extern "C" fn MUXED_FECSS_CHIRP_AVAIL_IRQ_AND_ADC_VALID_START_AND_SYNC_IN() {
     // chirp IRQ, so a >1-chirp-long ISR stretch LOSES an IRQ and seq falls
     // behind the hardware - inverting ping/pong parity and TX labels for
     // every following chirp. The frame/burst/chirp counters give the true
-    // absolute index; they are only sampled on PROMPT entries for the LAST
+    // absolute index; they are only sampled on prompt entries for the last
     // chirp of a burst (cc == cpb-1), where all three counters are frozen
     // until the next burst (>= the burst gap away) and therefore race-free.
     let cpb = CPB.load(Ordering::Relaxed);
@@ -420,14 +423,14 @@ extern "C" fn MUXED_FECSS_CHIRP_AVAIL_IRQ_AND_ADC_VALID_START_AND_SYNC_IN() {
     };
     let head = HEAD.load(Ordering::Relaxed);
     // Safe: single producer; COUNT < RING_CHIRPS means slots[head] is free.
-    // The copy runs with interrupts ENABLED so the priority-0 SPI feed ISR
+    // The copy runs with interrupts enabled so the priority-0 SPI feed ISR
     // can preempt it (a chirp pack takes up to ~70 us; the 20 MHz TX FIFO
     // underruns after ~50 us).
     // Torn-read guard: the DFE refills this ping/pong half starting at word
     // 0 one burst period from now; if word 0 changes across the pack, the
     // read overlapped the rewrite and the tail of the chirp is a mix of two
     // chirps. (SPI-feed preemption can stretch this ISR to ~1 ms wall time,
-    // so this genuinely happens on tight burst spacings.)
+    // so this occurs on tight burst spacings.)
     let guard = unsafe { core::ptr::read_volatile(0x5506_0000 as *const u32) };
     {
         let slot = unsafe { &mut (*RING.0.get()).slots[head] };
@@ -513,14 +516,14 @@ unsafe fn pack_block_bfp(src: *const u32, dst: *mut u8) {
 unsafe fn pack_pair(v: u32, p: *mut u8) {
     let s0 = v as u16;
     let s1 = (v >> 16) as u16;
-    if (s0 as i16).wrapping_add(2048) as u16 > 4095
-        || (s1 as i16).wrapping_add(2048) as u16 > 4095
+    if (s0 as i16).wrapping_add(2048) as u16 > 4095 || (s1 as i16).wrapping_add(2048) as u16 > 4095
     {
         OOR.fetch_add(1, Ordering::Relaxed);
     }
     unsafe {
         p.write(s0 as u8);
-        p.add(1).write((((s0 >> 8) & 0xF) | ((s1 & 0xF) << 4)) as u8);
+        p.add(1)
+            .write((((s0 >> 8) & 0xF) | ((s1 & 0xF) << 4)) as u8);
         p.add(2).write((s1 >> 4) as u8);
     }
 }

@@ -1,7 +1,3 @@
-// HAL for the TI IWRL6432 (xWRL6432) Cortex-M4F mmWave radar, on the owned
-// xwrl64xx-pac. No TI C is linked; register sequences were recovered from the
-// SDK sources and a running TI reference binary.
-
 #![no_std]
 
 pub use cortex_m;
@@ -48,6 +44,10 @@ pub fn normalize_after_bootloader() {
             core::ptr::write_volatile((NVIC_ICER + i * 4) as *mut u32, 0xFFFF_FFFF);
             core::ptr::write_volatile((NVIC_ICPR + i * 4) as *mut u32, 0xFFFF_FFFF);
         }
-        core::arch::asm!("cpsie i", "cpsie f", options(nomem, nostack, preserves_flags));
+        core::arch::asm!(
+            "cpsie i",
+            "cpsie f",
+            options(nomem, nostack, preserves_flags)
+        );
     }
 }

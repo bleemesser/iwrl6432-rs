@@ -72,7 +72,10 @@ pub fn start(cfg: &sensor::RadarConfig) -> Result<BringupReport, BringupError> {
         .as_ref()
         .map(|t| ((t.temp_c[0] as i32 + t.temp_c[4] as i32 + t.temp_c[8] as i32) / 3) as i16)
         .unwrap_or(25);
-    let runtime_cal = mb("runtime_cal", fecss::runtime_cal(fecss::temp_bin_for(temp_c)))?;
+    let runtime_cal = mb(
+        "runtime_cal",
+        fecss::runtime_cal(fecss::temp_bin_for(temp_c)),
+    )?;
 
     if !sensor::hwass_mem_init() {
         return Err(BringupError::HwassMemInit);
@@ -90,7 +93,12 @@ pub fn start(cfg: &sensor::RadarConfig) -> Result<BringupReport, BringupError> {
     // The FT latches the start key within a frame period.
     for _ in 0..200 {
         if sensor::start_honored() {
-            return Ok(BringupReport { fact_cal, runtime_cal, temp, temp_c });
+            return Ok(BringupReport {
+                fact_cal,
+                runtime_cal,
+                temp,
+                temp_c,
+            });
         }
         asm::delay(crate::clock::CORE_CLK_HZ / 1_000); // ~1 ms
     }

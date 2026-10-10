@@ -1,20 +1,10 @@
-// Preset radar profiles, sized to the measured SPI link (~1.2 MB/s wire at
-// 20 MHz, 12-bit packed = 1.5 B/sample).
-//
-// All profiles share the plumbing: coarse resolution (RES_00,
-// 100 ns timing LSB, 16-bit freq words), 3 RX, both TX, continuous frames.
-// Capture format ladder: Packed12 (exact) when the profile fits the link;
-// Bfp16 (semi-lossless, 1.41x smaller) when within ~1.4x of it; Sub12
-// (random subsampling + host L1 reconstruction) only beyond that - L1
-// distorts amplitudes and the noise floor (see tools/cs_diagnostics.py).
-
 use iwrl6432_hal::sensor::{ChirpCommon, ChirpTiming, FrameCfg, RadarConfig, Resolution};
 
 pub struct Profile {
     pub name: &'static str,
     /// One-line summary for the `profiles` listing.
     pub summary: &'static str,
-    /// What it is for, shown by `show <name>`.
+    /// Long description shown by `show <name>`.
     pub detail: &'static str,
     pub cfg: RadarConfig,
 }
@@ -23,27 +13,34 @@ pub struct Profile {
 /// wait for a CLI `start`.
 pub const AUTO_START: Option<&str> = Some("standard");
 
-/// Build a config from the shared base. LSBs: ramp/idle/burst 100 ns,
-/// frame 25 ns, slope ~28.61 kHz/us, freq 0xBE00=57 GHz..0xD555=64 GHz.
+/// LSB units: ramp/idle/burst 100 ns, frame 25 ns, slope ~28.61 kHz/us,
+/// freq 0xBE00=57 GHz..0xD555=64 GHz.
 fn cfg(
     samples: u16,
-    rate_code: u8,       // f_s = 100/code MSPS
-    slope: i16,          // slope LSBs
-    ramp: u16,           // ramp_end_time, 100 ns LSB
-    idle: u16,           // idle_time, 100 ns LSB
+    rate_code: u8, // f_s = 100/code MSPS
+    slope: i16,    // slope LSBs
+    ramp: u16,     // ramp_end_time, 100 ns LSB
+    idle: u16,     // idle_time, 100 ns LSB
     chirps_per_burst: u16,
     bursts_per_frame: u16,
-    burst_period: u32,  // 100 ns LSB
-    frame_period: u32,  // 25 ns LSB
+    burst_period: u32, // 100 ns LSB
+    frame_period: u32, // 25 ns LSB
 ) -> RadarConfig {
     // mmw_cli formula: 2.1845 * (ramp_us * slope_MHz_us) / min(idle_us - 1, 6)
     let ramp_us = ramp as f32 / 10.0;
     let slope_mhz = slope as f32 * 0.02861;
     let idle_us = idle as f32 / 10.0;
-    let div = if idle_us - 1.0 < 6.0 { idle_us - 1.0 } else { 6.0 };
+    let div = if idle_us - 1.0 < 6.0 {
+        idle_us - 1.0
+    } else {
+        6.0
+    };
     let crd = (2.1845 * ramp_us * slope_mhz / div) as u16;
     RadarConfig {
-        resolution: Resolution { freq_high_res: false, timing_high_res: false },
+        resolution: Resolution {
+            freq_high_res: false,
+            timing_high_res: false,
+        },
         common: ChirpCommon {
             sample_rate_code: rate_code,
             out_bits_sel: 0, // 12-bit round
@@ -102,10 +99,8 @@ pub fn profiles() -> [Profile; 8] {
             // 128 @ 6.25M (code 16), 40.0 MHz/us, 25 us ramp; 2x16 @0.5 ms, 50 fps
             cfg: cfg(128, 16, 1398, 250, 300, 2, 16, 5_000, 800_000),
         },
-        // CS Sub12: over the raw-link ceiling; host MUST run
-        // tools/cs_reconstruct.py (L1) to rebuild range profiles, and the scene
-        // must be reasonably sparse. Finer bins need more samples, which caps
-        // keep lower (fixed ring slot) and costs SNR.
+        // Over the raw-link ceiling at 1024 samples: bfp16 is semi-lossless
+        // (1.41x smaller than packed12) and needs no host reconstruction.
         Profile {
             name: "imaging",
             summary: "bfp16 | 1024 samp, 3.3 GHz sweep, 4.6 cm bins",
@@ -169,10 +164,9 @@ pub fn profiles() -> [Profile; 8] {
             // 512 @ 12.5M, 40.0 MHz/us, 45 us ramp, 50 us idle; 2x30 @1 ms, 10 fps
             cfg: cfg(512, 8, 1398, 450, 500, 2, 30, 10_000, 4_000_000),
         },
-        // CS Sub12 at 10 fps: range/sweep already maxed, so the slow refresh
-        // spends its budget on bursts per frame (24 vs 8) for a ~3x longer
-        // coherent window and much finer velocity resolution. Also CS, also
-        // needs cs_reconstruct.py.
+        // Sub12 at 10 fps: range/sweep already maxed, so the slow refresh buys
+        // 24 bursts/frame (vs 8) for a ~3x longer coherent window and much
+        // finer velocity resolution; host must run tools/cs_reconstruct.py.
         Profile {
             name: "deep_range",
             summary: "sub12 4/16 | 2048 samp, 7 GHz, 2.1 cm bins, 10 fps",
@@ -237,9 +231,11 @@ pub fn metrics(c: &RadarConfig) -> Metrics {
     let per_frame = c.frame.chirps_per_burst as u32 * c.frame.bursts_per_frame as u32;
     let fps = 40.0e6 / c.frame.frame_periodicity as f32;
     let cps = (per_frame as f32 * fps) as u32;
-    let payload =
-        iwrl6432_hal::capture::payload_bytes(c.common.num_adc_samples as usize, 3, c.capture_format)
-            as u32;
+    let payload = iwrl6432_hal::capture::payload_bytes(
+        c.common.num_adc_samples as usize,
+        3,
+        c.capture_format,
+    ) as u32;
     Metrics {
         fs_msps: fs,
         slope_mhz_us: slope,

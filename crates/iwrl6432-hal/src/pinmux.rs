@@ -1,9 +1,3 @@
-// Pad muxing via TOP_IO_MUX (0x5A00_0000). Each ball has a PADxx_CFG_REG
-// selecting function and pull; the registers are KICK-locked (writes ignored
-// unless the two KICK registers hold the unlock magics), so every write goes
-// through configure(). The config registers form a contiguous 32-bit array
-// (PADAA at +0x00), so Pad is just the index.
-
 use crate::pac;
 
 #[inline]
@@ -21,8 +15,30 @@ pub const PIN_PULL_DISABLE: u32 = 1 << 8;
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Pad {
-    Aa = 0, Ab, Ac, Ad, Ae, Af, Ag, Ah, Ai, Aj, Ak, Al,
-    Am, An, Ao, Ap, Aq, Ar, As, At, Au, Av, Aw, Ax,
+    Aa = 0,
+    Ab,
+    Ac,
+    Ad,
+    Ae,
+    Af,
+    Ag,
+    Ah,
+    Ai,
+    Aj,
+    Ak,
+    Al,
+    Am,
+    An,
+    Ao,
+    Ap,
+    Aq,
+    Ar,
+    As,
+    At,
+    Au,
+    Av,
+    Aw,
+    Ax,
 }
 
 /// Pad config value for function `mode` with pulls disabled.

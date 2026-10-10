@@ -1,9 +1,3 @@
-// GPIO via the GIO controller (0x5AF7_FC00). GIO groups pins into 8-bit
-// ports A..H with identical register blocks at a fixed stride, addressed here
-// as a grid rather than through the PAC's flat accessors. Constructing an
-// Output/Input un-gates the GIO clock; touching the block before that
-// bus-faults.
-
 use core::convert::Infallible;
 
 use crate::{clock, pac, pinmux};
@@ -27,7 +21,14 @@ const CLR: usize = 0x10; // write-1-to-clear
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Port {
-    A = 0, B, C, D, E, F, G, H,
+    A = 0,
+    B,
+    C,
+    D,
+    E,
+    F,
+    G,
+    H,
 }
 
 /// Logic level of a pin.

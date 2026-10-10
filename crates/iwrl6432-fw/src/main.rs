@@ -1,8 +1,3 @@
-// IWRL6432 firmware: M4 bring-up (clocks, embassy-time, async UART console),
-// radar bring-up via hal::radar, then embassy tasks: raw-ADC SPI streaming
-// (stream.rs), a profile-aware CLI on UARTB (cli.rs, presets in
-// profiles.rs), and a once-a-second status line.
-
 #![no_std]
 #![no_main]
 
@@ -13,14 +8,11 @@ mod stream;
 use cortex_m_rt::entry;
 use embassy_executor::Executor;
 use embassy_time::Timer;
-use iwrl6432_hal::{
-    self as hal, capture, fecss, mcspi, println, radar, sensor,
-    uart::Uart,
-};
+use iwrl6432_hal::{self as hal, capture, fecss, mcspi, println, radar, sensor, uart::Uart};
 use panic_halt as _;
 use static_cell::StaticCell;
 
-/// Console rate. The console is CLI-only (data goes out over SPI).
+/// Console rate. CLI-only (data goes out over SPI).
 const BAUD: u32 = 115_200;
 
 static EXECUTOR: StaticCell<Executor> = StaticCell::new();

@@ -1,8 +1,3 @@
-// APPSS (Cortex-M4F) clock and power bring-up, ported from SDK
-// SOC_clocksEnable / PowerClock_init. Gotcha: the 3-bit per-peripheral
-// clock-gate fields are inverted - 0x0 = enabled, 0x7 = gated (the reset
-// value) - so "enable a clock" means writing 0x0.
-
 use crate::pac;
 
 /// Board crystal (40 MHz): source for the UART and RTI functional clocks.
@@ -15,7 +10,7 @@ pub const UART_CLK_HZ: u32 = XTAL_HZ;
 pub const RTI_CLK_HZ: u32 = XTAL_HZ;
 
 /// Lock the digital PLL and run the M4 (and its peripheral clock tree) from it.
-/// Call once, first - until it runs, peripheral accesses bus-fault.
+/// Call once, first: until it runs, peripheral accesses bus-fault.
 pub fn init_core(dp: &pac::Peripherals) {
     const LOCKMON: u32 = 1 << 8; // PLLDIG_STATUS lock bit
     if dp.plldig_ctrl.plldig_status().read().bits() & LOCKMON == 0 {
@@ -87,7 +82,7 @@ pub fn enable_rti(dp: &pac::Peripherals) {
 }
 
 /// Errata ANA-52 (PG1 silicon only): clear the Slicer LDO TLOAD after the
-/// oscillator is up. Our ES2.0 board is PG != 1, so this is a guarded no-op.
+/// oscillator is up. Gated on the PG eFuse; a no-op on PG != 1 silicon.
 fn errata_ana52_ldo() {
     const EFUSE0_ROW_18: *const u32 = (0x5A02_0000 + 0x38) as *const u32;
     const LDO_CLKTOP: *mut u32 = 0x5A04_0520 as *mut u32;

@@ -1,8 +1,3 @@
-// Interrupt-driven async SCI UART via sci_uart!. One instance:
-// - console: UARTB (UART1, 0x57F7_F000, SCI2/IRQ 62), pads AO/AP mode 2. The
-//   XDS110 backchannel on the BOOST; print!/println! target.
-// UARTA (UART0, SCI1/IRQ 8) is unused; the board wiring is not meant for it.
-
 use core::cell::RefCell;
 use core::convert::Infallible;
 use core::future::poll_fn;
@@ -75,7 +70,7 @@ macro_rules! sci_uart {
 
             impl Uart {
                 /// Bring the UART up for 8N1 at `baud` (functional clock =
-                /// [`clock::UART_CLK_HZ`]): clock, pads, SCI config.
+                /// [`clock::UART_CLK_HZ`]).
                 pub fn new(dp: &pac::Peripherals, baud: u32) -> Self {
                     $enable_clock(dp);
                     pinmux::configure(dp, $tx_pad, pinmux::pad_cfg($tx_mode));
@@ -119,7 +114,7 @@ macro_rules! sci_uart {
             /// Push one byte and enable the TX interrupt atomically (same
             /// critical section as the ISR's pop/disable). The SCI TX
             /// interrupt is edge-triggered on TXRDY: if the transmitter is
-            /// idle there is no edge, so pend the ISR to prime the pump -
+            /// idle there is no edge, so pend the ISR to prime the pump;
             /// without this the first send after boot deadlocks.
             #[inline]
             fn push_tx(c: u8) -> bool {
@@ -135,7 +130,6 @@ macro_rules! sci_uart {
                 })
             }
 
-            /// Await one received byte.
             pub async fn read_byte() -> u8 {
                 poll_fn(|cx| {
                     RX_WAKER.register(cx.waker());
@@ -235,7 +229,7 @@ macro_rules! sci_uart {
 }
 
 sci_uart!(
-    /// Console port - UARTB (UART1), the [`print!`]/[`println!`] target.
+    /// Console port: UARTB (UART1), the [`print!`]/[`println!`] target.
     console,
     base = 0x57F7_F000,
     irq = APPSS_SCI2_INT0,
