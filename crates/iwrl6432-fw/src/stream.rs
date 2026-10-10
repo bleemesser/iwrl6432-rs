@@ -1,28 +1,25 @@
+// Chunk magics: 5A A5 status header, A5 5C packed12, A5 5B bfp16, A5 6k sub12
+// keeping k of 16 pairs, A5 5E config descriptor (sent once a second).
+
 use embassy_time::{Duration, Instant};
 use iwrl6432_hal::{capture, mcspi, sensor};
 
-/// Config-descriptor chunk magic (`A5 5E`), distinct from the sample chunks
-/// (`A5 5C` packed12 / `A5 6k` sub12) and the status header (`5A A5`). Carries
-/// sample count, RX, format and every RF param the host needs for the physical
-/// axes and MIMO layout. See tools/radar_scope.py.
+/// Config-descriptor chunk magic, carrying the geometry and RF params the host
+/// needs for physical axes and the MIMO layout.
 const META_MAGIC: u8 = 0x5E;
-/// Descriptor payload length (bytes); whole SPI words. Layout mirrored by the
-/// host `struct.unpack(">BBBBHHHBBhHHxxIII", ...)`.
+/// Descriptor payload length. Mirrored by the host
+/// `struct.unpack(">BBBBHHHBBhHHxxIII", ...)`.
 const META_LEN: usize = 32;
 /// Re-emit the descriptor at least this often even without a reconfigure.
 const META_PERIOD: Duration = Duration::from_millis(1000);
 
-/// A push stalled this long means the host stopped clocking mid-batch and
-/// never re-polled (e.g. the capture tool died): recover to poll-listening.
+/// A push stalled this long means the host stopped clocking mid-batch and never
+/// re-polled, so recover to poll-listening.
 const STALL_TIMEOUT: Duration = Duration::from_millis(100);
 
-/// No recognized poll for this long (with nothing being pushed) means the
-/// slave's word framing is desynced: a host abandoned a transaction mid-cycle
-/// so the poll magic no longer lands word-aligned and the ISR never sees
-/// another poll. The push-based STALL_TIMEOUT can't catch this (no push is in
-/// flight), so re-init the channel unconditionally. Well above the host's
-/// active poll gap (sub-ms..ms), so it only fires on a real wedge or a genuinely
-/// idle port (where the re-init is harmless).
+/// No recognized poll for this long with nothing in flight means the slave's
+/// word framing desynced, which [`STALL_TIMEOUT`] cannot catch. Sits well above
+/// the host's active poll gap, so it only fires on a real wedge or an idle port.
 const IDLE_TIMEOUT: Duration = Duration::from_millis(300);
 
 fn chirp_magic() -> u8 {
@@ -33,9 +30,8 @@ fn chirp_magic() -> u8 {
     }
 }
 
-/// Write a config-descriptor chunk (header + 32-byte payload) into `tx` at word
-/// `nw`, returning the new word index. Geometry (samples/rx/format) is the
-/// capture-drain truth; RF params come from the active config.
+/// Write a config-descriptor chunk into `tx` at word `nw`, returning the new
+/// word index.
 fn build_meta(tx: &mut [u32], nw: usize, cfg: &sensor::RadarConfig) -> usize {
     let (c, t, f) = (&cfg.common, &cfg.timing, &cfg.frame);
     let mut d = [0u8; META_LEN];
@@ -68,8 +64,9 @@ fn build_meta(tx: &mut [u32], nw: usize, cfg: &sensor::RadarConfig) -> usize {
     nw + 2 + META_LEN / 4
 }
 
-/// Keep the SPI ISR's batch double buffer fed from the capture ring, and
-/// watchdog abandoned pushes.
+/// Keep the SPI ISR's batch double buffer fed from the capture ring and
+/// watchdog abandoned pushes. Polls are answered by the ISR, so batch building
+/// never sits in the poll-response path.
 #[embassy_executor::task]
 pub async fn spi_stream() {
     let mut buf = [0u8; capture::MAX_CHIRP_BYTES];
@@ -79,16 +76,14 @@ pub async fn spi_stream() {
     let mut stall = (0usize, Instant::now());
     let mut idle = (mcspi::polls(), Instant::now());
     loop {
-        // A reconfigure resets the ring; drop armed batches built for the old
-        // profile (stale lengths/sequence numbers).
+        // a reconfigure resets the ring, so drop batches armed for the old profile
         let g = capture::generation();
         if g != ring_gen {
             ring_gen = g;
             mcspi::flush_armed();
         }
 
-        // Stall watchdog (see STALL_TIMEOUT). While a push makes progress
-        // the deadline keeps moving.
+        // the deadline keeps moving while a push makes progress
         let (pos, len) = mcspi::push_progress();
         let now = Instant::now();
         if pos == 0 || pos >= len || pos != stall.0 {
@@ -98,9 +93,7 @@ pub async fn spi_stream() {
             stall = (0, now);
         }
 
-        // Idle/wedge watchdog (see IDLE_TIMEOUT): if no poll has been recognized
-        // for a while and nothing is being pushed, re-init the slave channel so
-        // a framing-desynced port can self-heal instead of needing a reset.
+        // re-init the channel so a framing-desynced port self-heals without a reset
         let p = mcspi::polls();
         if p != idle.0 {
             idle = (p, now);
@@ -113,15 +106,9 @@ pub async fn spi_stream() {
             embassy_futures::yield_now().await;
             continue;
         }
-        // Build as late as possible so batches carry a full host cycle of
-        // chirps: an armed batch cannot grow, and arming eagerly locks the
-        // batch size to a few chirps (which wastes the host's fixed ~ms
-        // per-poll USB cost on tiny reads). Build when:
-        //  - nothing is armed and no read is in flight (a poll could arrive
-        //    any moment and deserves a non-empty answer), or
-        //  - the in-flight read is ~75% pushed (the next poll is imminent;
-        //    everything accumulated during this read comes along), or
-        //  - the ring is about to overflow.
+        // build as late as possible so batches carry a full host cycle of chirps,
+        // since an armed batch cannot grow and tiny reads waste the host's fixed
+        // per-poll USB cost
         let (pos, len) = mcspi::push_progress();
         let reading = mcspi::is_serving();
         let hungry = !reading && !mcspi::any_armed();
@@ -139,8 +126,6 @@ pub async fn spi_stream() {
         let mut first_seq = 0;
         let mut total = 0usize;
 
-        // Prepend a self-describing config descriptor on a reconfigure and
-        // then at most once per META_PERIOD (negligible bandwidth).
         if let Some(cfg) = sensor::active_config() {
             if g != meta_gen || now >= meta_deadline {
                 nw = build_meta(tx, nw, &cfg);

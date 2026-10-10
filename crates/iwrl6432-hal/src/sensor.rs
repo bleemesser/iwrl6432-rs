@@ -1,8 +1,6 @@
 use cortex_m::asm;
 
-// Last config passed to [`configure`], for the self-describing stream metadata
-// frame (stream.rs). RadarConfig is Copy; a single-core critical section keeps
-// the read/write from tearing against the streaming task.
+// the critical section keeps the read/write from tearing against the stream task
 static ACTIVE_CONFIG: critical_section::Mutex<core::cell::Cell<Option<RadarConfig>>> =
     critical_section::Mutex::new(core::cell::Cell::new(None));
 
@@ -80,9 +78,9 @@ fn rmw(addr: usize, clear: u32, set: u32) {
     wr(addr, (rd(addr) & !clear) | set);
 }
 
-/// Timing/frequency resolution (CHIRP_TIMER_PROG_RESOLUTION). Sets the LSB of
-/// every timing field and the width of the frequency words.
-/// [`FrameCfg::frame_periodicity`] is always in XTAL clocks.
+/// Timing and frequency resolution, setting the LSB of every timing field and
+/// the width of the frequency words. [`FrameCfg::frame_periodicity`] is always
+/// in XTAL clocks regardless.
 #[derive(Clone, Copy)]
 pub struct Resolution {
     /// Frequency word width: false = 16-bit, true = 24-bit.
@@ -91,10 +89,10 @@ pub struct Resolution {
     pub timing_high_res: bool,
 }
 
-/// Chirp profile, "common" parameters (T_RL_API_SENS_CHIRP_PROF_COMN_CFG).
+/// Chirp profile parameters shared across the sweep.
 #[derive(Clone, Copy)]
 pub struct ChirpCommon {
-    /// ADC sample-rate code; MSPS = 400 / (code * 4). Range 8..=100 (8 = 12.5 MSPS).
+    /// ADC sample-rate code, where MSPS is 400 / (code * 4). Range 8..=100.
     pub sample_rate_code: u8,
     /// Output bits: 0 = 12-bit round-to-4-LSB ... 5 = 16-bit.
     pub out_bits_sel: u8,
@@ -117,7 +115,7 @@ pub struct ChirpCommon {
     pub misc_settings: u8,
 }
 
-/// Chirp profile, timing/frequency parameters (T_RL_API_SENS_CHIRP_PROF_TIME_CFG).
+/// Chirp profile timing and frequency parameters.
 #[derive(Clone, Copy)]
 pub struct ChirpTiming {
     /// Idle time before the ramp. LSB = timing resolution.
@@ -130,8 +128,8 @@ pub struct ChirpTiming {
     pub tx_start_time: i16,
     /// FMCW slope, signed. LSB ~28.61 kHz/us (0x4D ~ 2.2 MHz/us).
     pub freq_slope: i16,
-    /// RF start frequency. 16-bit low-res: 0xBE00 (57 GHz)..0xD555 (64 GHz);
-    /// 24-bit high-res: 0x00BE0000..0x00D55555. Sweep must stay in-band.
+    /// RF start frequency, 0xBE00 to 0xD555 spanning 57 to 64 GHz at 16-bit
+    /// resolution, 0x00BE0000 to 0x00D55555 at 24-bit. Sweep must stay in-band.
     pub freq_start: u32,
     /// Per-chirp TX enable mask (bit0 TX0, bit1 TX1).
     pub tx_en: u16,
@@ -139,11 +137,10 @@ pub struct ChirpTiming {
     pub tx_bpm_en: u16,
 }
 
-/// Frame configuration (T_RL_API_SENS_FRAME_CFG): `bursts_per_frame` bursts
-/// of `chirps_per_burst` chirps.
+/// Frame configuration, `bursts_per_frame` bursts of `chirps_per_burst` chirps.
 #[derive(Clone, Copy)]
 pub struct FrameCfg {
-    /// Range 1..=65535. Must be EVEN when using [`crate::capture`] (ping/pong parity).
+    /// Range 1..=65535. Must be even when using [`crate::capture`], for parity.
     pub chirps_per_burst: u16,
     /// Range 1..=4096.
     pub bursts_per_frame: u16,
@@ -153,32 +150,28 @@ pub struct FrameCfg {
     pub burst_periodicity: u32,
     /// Time between frame starts. LSB = 1 XTAL clock (25 ns at 40 MHz).
     pub frame_periodicity: u32,
-    /// Frames to run; 0 = continuous. (1 is accepted by the FT but never
-    /// starts a frame.)
+    /// Frames to run, 0 for continuous. 1 is accepted but never starts a frame.
     pub num_frames: u16,
 }
 
-/// Complete radar configuration: resolution + chirp profile + frame timing.
+/// Complete radar configuration.
 #[derive(Clone, Copy)]
 pub struct RadarConfig {
     pub resolution: Resolution,
     pub common: ChirpCommon,
     pub timing: ChirpTiming,
     pub frame: FrameCfg,
-    /// Sample encoding applied by the capture drain (not an RFS parameter).
+    /// Sample encoding applied by the capture drain, not an RFS parameter.
     pub capture_format: crate::capture::Format,
 }
 
 impl Default for RadarConfig {
-    /// Known-good streaming profile: ~60.5 GHz start, 2.2 MHz/us over a 40 us
-    /// ramp, 12.5 MSPS, 256 samples, both TX; 2 chirps/burst x 16 bursts at
-    /// 1 ms, 25 fps -> 800 chirps/s (sized to the SPI link).
+    /// Build a known-good streaming profile: ~60.5 GHz start, 2.2 MHz/us over a
+    /// 40 us ramp, 12.5 MSPS, 256 samples, both TX, 800 chirps/s at 25 fps.
     fn default() -> Self {
         RadarConfig {
             resolution: Resolution {
-                // Coarse resolution on both: the SDK hardcodes RES_00 (100 ns,
-                // 16-bit freq words) and the RFS accepts only that encoding of
-                // these CT registers.
+                // the RFS has only ever seen RES_00 encoding of these registers
                 freq_high_res: false,
                 timing_high_res: false,
             },
@@ -187,14 +180,13 @@ impl Default for RadarConfig {
                 out_bits_sel: 0,     // 12-bit round
                 fir_sel: 0,          // long FIR
                 num_adc_samples: 256,
-                // TDMA-2TX (even chirp TX0, odd TX1): customs built from this
-                // default inherit it, and the host DSP consumes the 6-element
-                // virtual array the streamed meta promises.
+                // TDMA-2TX like every preset, since the host DSP needs the
+                // 6-channel virtual array the streamed metadata promises
                 mimo_pattern: 1,
                 ramp_end_time: 400,         // 40 us
                 rx_hpf_sel: 1,              // 350 kHz
                 hpf_fast_init_duration: 15, // 1.5 us
-                // mmw_cli formula: 2.1845 * (rampEnd_us * slope_MHz_us) / min(idle_us - 1, 6)
+                // 2.1845 * ramp_us * slope_mhz_us, over min(idle_us minus 1, 6)
                 crd_nslope_mag: 38,
                 misc_settings: 0,
             },
@@ -221,7 +213,7 @@ impl Default for RadarConfig {
     }
 }
 
-/// Rejected [`RadarConfig`] field (bounds check in [`configure`]).
+/// The [`RadarConfig`] field [`configure`] rejected.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ConfigError {
     NumAdcSamples,
@@ -230,7 +222,7 @@ pub enum ConfigError {
     FrameCounts,
 }
 
-/// Frame trigger mode (c_FrameTrigMode for [`start`]).
+/// Frame trigger mode for [`start`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FrameTrigMode {
     /// Frames start as soon as [`start`] fires.
@@ -243,9 +235,8 @@ pub enum FrameTrigMode {
     HwLowJitter = 3,
 }
 
-/// Program the chirp timer, DFE and frame timer from `cfg`; does not start
-/// frames ([`start`] does). SDK order: resolution -> common -> timing -> frame.
-/// On a rejected field nothing is written.
+/// Program the chirp timer, DFE and frame timer from `cfg`. Does not start
+/// frames, which [`start`] does. Nothing is written if a field is rejected.
 pub fn configure(cfg: &RadarConfig) -> Result<(), ConfigError> {
     let (c, t, f) = (&cfg.common, &cfg.timing, &cfg.frame);
     if !(2..=2048).contains(&c.num_adc_samples) {
@@ -261,17 +252,16 @@ pub fn configure(cfg: &RadarConfig) -> Result<(), ConfigError> {
         return Err(ConfigError::FrameCounts);
     }
 
-    // Idle the frame timer so re-arming works even if a previous run left it
-    // running.
+    // idle the frame timer so re-arming works if a previous run left it running
     reset();
 
-    // Resolution first: it defines the units of everything below.
+    // resolution first, since it defines the units of everything below
     wr(
         CT_RESOLUTION,
         cfg.resolution.freq_high_res as u32 | ((cfg.resolution.timing_high_res as u32) << 1),
     );
 
-    // DFE RX cfg (sample rate[11:4], samples[23:12], FIR[25:24], bits[28:26]).
+    // sample rate[11:4], samples[23:12], FIR[25:24], bits[28:26]
     rmw(
         DFE_RX_CFG,
         0x1FFF_FFF0,
@@ -293,7 +283,7 @@ pub fn configure(cfg: &RadarConfig) -> Result<(), ConfigError> {
     let crd_en = (c.misc_settings & 0x2) == 0;
     let crd_dither_en = (c.misc_settings & 0x4) == 0;
     rmw(CT_CRD_1, 0x3, crd_en as u32 | ((crd_dither_en as u32) << 1));
-    // RFS analog-setup mirror (plain RAM): sample rate at byte 0, HPF at byte 2.
+    // plain-RAM mirror the RFS reads for pre-frame analog setup
     wr(
         RFS_CHIRP_MIRROR,
         c.sample_rate_code as u32 | ((c.rx_hpf_sel as u32) << 16),
@@ -330,15 +320,13 @@ pub fn configure(cfg: &RadarConfig) -> Result<(), ConfigError> {
     Ok(())
 }
 
-/// Arm and start frames (after [`configure`]). Follows SDK fe_sensorStart.
+/// Arm and start frames. Call after [`configure`].
 pub fn start(mode: FrameTrigMode) {
-    // Re-assert the DFE clock un-gate (IPCFGCLKGATE1.FecDfe [8:6] -> 0): the
-    // RFS reprograms that register during boot, and a gated DFE writes nothing
-    // to the ADCBUF.
+    // re-assert the DFE clock un-gate, since the RFS reprograms that register
+    // during boot and a gated DFE writes nothing to the ADCBUF
     wr(super::fecss::FEC_IPCFGCLKGATE1_PUB, 0x7007);
 
-    // Clear the RFS sensor status + write the live-mon sensor-start config
-    // (0 = live monitors disabled). Plain RAM, no doorbell.
+    // plain RAM, no doorbell. 0 disables the live monitors
     for i in 0..8 {
         wr(RFS_SENS_STATUS + i * 4, 0);
     }
@@ -357,14 +345,13 @@ pub fn start(mode: FrameTrigMode) {
     wr(FT_TRIGGERING, m | FT_START_KEY); // fire
 }
 
-/// Stop frames at the next frame boundary (fe_sensorStop, mode 0).
+/// Stop frames at the next frame boundary.
 pub fn stop() {
     rmw(FT_TRIGGERING, FT_STOP_KEY, FT_STOP_KEY);
 }
 
-/// Force the frame timer back to idle (core of SDK sens_ftSensorForceStop):
-/// clear both timers' done flags, pulse the APPSS frame-timer reset. Resets
-/// the FT registers; [`configure`] reprograms them.
+/// Force the frame timer back to idle. This resets the FT registers, which
+/// [`configure`] reprograms.
 pub fn reset() {
     wr(FT_TRIG_STOP_DONE, TRIG_STOP_CLEAR);
     wr(CT_TRIG_STOP_DONE, TRIG_STOP_CLEAR);
@@ -373,30 +360,29 @@ pub fn reset() {
     rmw(APPSS_FT_RESET, FT_RESET_MASK, 0);
 }
 
-/// `true` once the frame timer has honored the start (TRIG_STOP_DONE[0]).
+/// Report whether the frame timer has honored the start.
 pub fn start_honored() -> bool {
     rd(FT_TRIG_STOP_DONE) & 0x1 != 0
 }
 
-/// Running frame count; climbs while frames run.
+/// Read the running frame count, which climbs while frames run.
 pub fn frame_count() -> u16 {
     (rd(FT_FRAME_CNT) & 0xFFFF) as u16
 }
 
-/// Running chirp count.
+/// Read the running chirp count.
 pub fn chirp_count() -> u32 {
     rd(CT_CHIRP_CNT)
 }
 
-/// Running burst count.
+/// Read the running burst count.
 pub fn burst_count() -> u16 {
     (rd(CT_BURST_CNT) & 0xFFFF) as u16
 }
 
-/// The RFS's own frame-service counters (T_FE_API_RFS_SENSOR_STATUS):
-/// `(burst_start, frame_start, frame_free_run)`. Non-zero means the RFS M3 is
-/// servicing frame-start events; frame_start stuck at 0 while frame_count
-/// climbs means the RFS is dead (check [`crate::fecss::rfs_fault_status`]).
+/// Read the RFS's own `(burst_start, frame_start, frame_free_run)` counters.
+/// A `frame_start` stuck at 0 while [`frame_count`] climbs means the RFS is
+/// dead, so check [`crate::fecss::rfs_fault_status`].
 pub fn rfs_frame_status() -> (u32, u32, u32) {
     (
         rd(RFS_SENS_STATUS),        // w_BurstStartCount
@@ -405,20 +391,18 @@ pub fn rfs_frame_status() -> (u32, u32, u32) {
     )
 }
 
-// HWASS shared-RAM mem-init (backs the ADCBUF datapath).
 const HWASS_SHRD_RAM_MEM_INIT: usize = ADCBUF_CTRL + 0x38;
 const HWASS_SHRD_RAM_MEM_DONE: usize = ADCBUF_CTRL + 0x3C;
 const HWASS_SHRD_RAM_MEM_STATUS: usize = ADCBUF_CTRL + 0x40;
 const MEM_BIT: u32 = 1 << 0;
 const MEM_INIT_TRIES: u32 = 1_000_000;
 
-/// Mem-initialise the HWASS 160 KB shared RAM behind the ADCBUF. Required
-/// before capture: until this runs the DFE's ADC writes never commit and the
-/// ADCBUF reads as static power-on RAM. Needs [`crate::clock::enable_hwass`]
-/// first. `false` on poll timeout.
+/// Mem-initialize the HWASS shared RAM behind the ADCBUF, returning `false` on
+/// poll timeout. Required before capture, since until it runs the DFE's ADC
+/// writes never commit. Needs [`crate::clock::enable_hwass`] first.
 pub fn hwass_mem_init() -> bool {
     if !wait_bit(HWASS_SHRD_RAM_MEM_STATUS, false) {
-        return false; // an earlier init still in flight
+        return false; // an earlier init is still in flight
     }
     wr(HWASS_SHRD_RAM_MEM_DONE, MEM_BIT); // clear a stale done
     if !wait_bit(HWASS_SHRD_RAM_MEM_DONE, false) {
@@ -441,15 +425,15 @@ fn wait_bit(addr: usize, want: bool) -> bool {
     false
 }
 
-/// Bytes the ADCBUF allots per RX per chirp: `num_adc_samples * 2` (real
-/// int16), rounded up to the required 16-byte alignment.
+/// Compute the bytes the ADCBUF allots per RX per chirp, rounded up to the
+/// required 16-byte alignment.
 pub fn adc_bytes_per_rx(num_adc_samples: u16) -> usize {
     (num_adc_samples as usize * 2).div_ceil(16) * 16
 }
 
-/// Configure the ADCBUF for real int16 capture of the RX channels in
-/// `rx_mask`, non-interleaved: RX n lands at `0x55060000 + n *
-/// `[`adc_bytes_per_rx`]. Call before [`start`].
+/// Configure the ADCBUF for non-interleaved real int16 capture of the RX
+/// channels in `rx_mask`, where RX n lands [`adc_bytes_per_rx`] apart. Call
+/// before [`start`].
 pub fn adcbuf_config(rx_mask: u16, num_adc_samples: u16) {
     let units = (adc_bytes_per_rx(num_adc_samples) / 16) as u32; // 16-B units
     wr(

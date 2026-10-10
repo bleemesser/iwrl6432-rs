@@ -7,7 +7,8 @@ fn base() -> usize {
     pac::TopGio::PTR as usize
 }
 
-// Port register grid: base + PORT0_OFF + port*PORT_STRIDE + field.
+// ports A..H have identical register blocks at a fixed stride, addressed as a
+// grid rather than through the PAC's flat accessors
 const GIOGCR: usize = 0x00; // bit 0 = module out of reset
 const PORT0_OFF: usize = 0x34;
 const PORT_STRIDE: usize = 0x20;
@@ -56,9 +57,8 @@ pub struct PinDef {
     pub mode: u32,
 }
 
-/// The IWRL6432BOOST USER_LED / USER_SW pin: GPIO5 (port A bit 5) -> PAD_AV
-/// (ball J10), mode 0, active-high. Reaches the SoC only with board switch
-/// S1.6 OFF (ON routes the pad to the J2 SPI header instead).
+/// The IWRL6432BOOST USER_LED / USER_SW pin, active-high. Reaches the SoC only
+/// with board switch S1.6 off, since on routes the pad to the J2 SPI header.
 pub const GPIO5: PinDef = PinDef {
     port: Port::A,
     bit: 5,
@@ -86,7 +86,8 @@ pub struct Output {
 }
 
 impl Output {
-    /// Configure `pin` as an output driving `level`.
+    /// Configure `pin` as an output driving `level`. Un-gates the GIO clock, which
+    /// must happen before anything touches the register block.
     pub fn new(dp: &pac::Peripherals, pin: PinDef, level: Level) -> Self {
         clock::enable_gpio(dp);
         pinmux::configure(dp, pin.pad, pinmux::pad_cfg(pin.mode));
@@ -144,8 +145,7 @@ impl Input {
     /// Configure `pin` as an input with the given internal `pull`.
     pub fn new(dp: &pac::Peripherals, pin: PinDef, pull: Pull) -> Self {
         clock::enable_gpio(dp);
-        // Force the input buffer on (IE_OVERRIDE_CTRL | IE_OVERRIDE, bits 4/5).
-        // PI (bit 8) = 1 disables the pull; PUPDSEL (bit 9) picks up (1) / down (0).
+        // force the input buffer on via IE_OVERRIDE_CTRL and IE_OVERRIDE
         const IE_FORCE: u32 = (1 << 4) | (1 << 5);
         let pull_bits = match pull {
             Pull::None => pinmux::PIN_PULL_DISABLE,
@@ -175,8 +175,6 @@ impl Input {
         !self.is_high()
     }
 }
-
-// embedded-hal 1.0 digital traits (infallible on this GIO).
 
 impl embedded_hal::digital::ErrorType for Input {
     type Error = Infallible;

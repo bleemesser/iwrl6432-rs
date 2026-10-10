@@ -1,6 +1,5 @@
 use cortex_m::asm;
 
-// Peripheral bases.
 const TOP_PRCM: usize = 0x5A04_0000; // FEC power domain
 const FEC_CTRL: usize = 0x5200_0000; // FECSS control (meminit, IPC, M3 halt)
 const FEC_RCM: usize = 0x5202_0000; // FECSS clock/reset
@@ -11,8 +10,8 @@ const APP_FEC_CLK_GATE: usize = 0x5606_0394; // APPSS-side FECSS root clock gate
 const FEC_PWR_REQ_PARAM: usize = TOP_PRCM + 0x00C;
 const FEC_CORE_SYSRESET_PARAM: usize = TOP_PRCM + 0x018;
 const PSCON_FEC_PD_EN: usize = TOP_PRCM + 0x458;
-/// FRC (Frame-Reference-Counter) OSC clock gate (0=running, 7=gated).
-/// Un-gating this is what delivers frame-start events into the FECSS.
+/// Frame-reference-counter OSC clock gate (0 running, 7 gated). Un-gating this
+/// is what delivers frame-start events into the FECSS.
 const FRC_OSC_CLK_GATE: usize = TOP_PRCM + 0x504;
 const PSCON_FEC_PD_RAM_STATE: usize = TOP_PRCM + 0x474;
 const PSCON_FEC_PD_GRP4_STATE: usize = TOP_PRCM + 0x478;
@@ -36,14 +35,14 @@ const MEM_DONE: u32 = 1 << 0;
 const FEC_SYS_CLKCTL: usize = FEC_RCM + 0x004;
 const FEC_IPCFGCLKGATE0: usize = FEC_RCM + 0x034;
 const FEC_IPCFGCLKGATE1: usize = FEC_RCM + 0x038;
-/// sensor::start re-asserts the DFE un-gate: the RFS reprograms GATE1 during
-/// boot, so the power_on-time write does not survive.
+/// Exposed so [`crate::sensor::start`] can re-assert the DFE un-gate, since the
+/// RFS reprograms GATE1 during boot and the [`power_on`] write does not survive.
 pub(crate) const FEC_IPCFGCLKGATE1_PUB: usize = FEC_IPCFGCLKGATE1;
 
-/// Ungate DFE + chirp-timer IP clocks (fe_driver.c).
+/// Un-gate the DFE and chirp-timer IP clocks.
 const IPCFGCLKGATE0_ON: u32 = 0x381C_0038;
-/// GATE1 value that ungates FecDfe[8:6]; the reset default leaves it gated,
-/// and a gated DFE never writes the ADCBUF.
+/// Un-gate `FecDfe`, which resets to gated, and a gated DFE never writes the
+/// ADCBUF.
 const IPCFGCLKGATE1_ON: u32 = 0x7007;
 
 // RFS IPC shared-RAM offsets.
@@ -51,66 +50,58 @@ const RFS_MAILBOX: usize = RFS_IPC + 0x000; // w_IpcMailbox[32], 128 B
 const RFS_BOOT_INFO: usize = RFS_IPC + 0x100;
 const RFS_BOOT_STS: usize = RFS_IPC + 0x108;
 const RFS_CPU_FAULT_STS: usize = RFS_IPC + 0x120;
-/// Temp-measurement config is a plain RAM write (z_TempMeasCfgCmd), not a
-/// mailbox command.
+/// Temp-measurement config is a plain RAM write, not a mailbox command.
 const RFS_TEMP_CFG: usize = RFS_IPC + 0x19C;
 
-// Mailbox trigger/handshake registers (rfs_rfsMbInit).
 const IPC_CMD_TRIG: usize = 0x5606_0028; // M4 -> FECSS command doorbell
 const FECSS_IPC_RFS: usize = FEC_CTRL + 0x05C; // FECSS -> M4 response status
 const FECSS_IPC_BUSY_INT0: usize = FEC_CTRL + 0x060; // busy/handshake flag
 
-// Mailbox handshake constants (rfs_driver.h).
 const MB_SEND_TRIG: u32 = 0xA1;
 const MB_READ_ACK: u32 = 0x50;
 const MB_MAX_PAYLOAD_WORDS: usize = 31; // 124 B minus header
 
-// RFS command IDs (rfs_command.h).
 const CMD_RF_PWR_ONOFF: u16 = 0x0001;
 const CMD_FACT_CAL: u16 = 0x0002;
 const CMD_APLL_CLK_CTRL: u16 = 0x0003;
 const CMD_RUNTIME_CAL: u16 = 0x0004;
 const CMD_TEMP_TRIG: u16 = 0x0007;
 
-// APLL_CLK_CTRL field values (dfp_device.h).
-/// c_DevClkCtrl: FECSS clock source = fast clock.
+/// Run the FECSS off the fast clock.
 pub const DEV_CLK_FCLK: u8 = 0x0A;
-/// c_DevClkCtrl: FECSS clock source = XTAL (40 MHz boot clock).
+/// Run the FECSS off the 40 MHz XTAL boot clock.
 pub const DEV_CLK_XTAL: u8 = 0x00;
-/// c_FtClkCtrl: frame-timer clock source = XTAL.
+/// Run the frame timer off the XTAL.
 pub const FT_CLK_XTAL: u8 = 0x00;
-/// c_ApllClkCtrl: APLL on + calibrate (first boot).
+/// Turn the APLL on and calibrate it, for a first boot.
 pub const APLL_ON_CAL: u8 = 0xAA;
-/// c_ApllClkCtrl: APLL on without recalibrating (warm re-enable).
+/// Turn the APLL on without recalibrating, for a warm re-enable.
 pub const APLL_ON: u8 = 0x0A;
 
-// FEC_SYS_CLKCTL FCLK config (fe_fecssClockSwitch): divider [27:16]=0x111,
-// source [15:4]=0x333 (DIG_PLL /2 = 80 MHz); divider written first.
+// divider [27:16] and source [15:4] for DIG_PLL /2 = 80 MHz, divider written first
 const FEC_FCLK_DIVR: u32 = 0x111;
 const FEC_FCLK_SRCSEL: u32 = 0x333;
 
-/// Calibration mask the SDK cold boot runs (VCO, PD, LODIST, RX-gain,
-/// TX-power); FACT_CAL and RUNTIME_CAL echo it in run_status on success.
+/// Cold-boot calibration mask covering VCO, PD, LODIST, RX-gain and TX-power.
+/// [`fact_cal`] and [`runtime_cal`] echo it in `run_status` on success.
 pub const CAL_MASK_COLDBOOT: u16 = 0x00CE;
 
-/// c_TempBinIndex values for RUNTIME_CAL (dfp_device.h).
-pub const TEMP_BIN_LOW: u8 = 0x00; // < 0 deg C
-pub const TEMP_BIN_MID: u8 = 0x08; // 0..84 deg C
-pub const TEMP_BIN_HIGH: u8 = 0x10; // >= 85 deg C
+/// Temperature bin below 0 deg C, for [`runtime_cal`].
+pub const TEMP_BIN_LOW: u8 = 0x00;
+/// Temperature bin from 0 to 84 deg C, for [`runtime_cal`].
+pub const TEMP_BIN_MID: u8 = 0x08;
+/// Temperature bin at or above 85 deg C, for [`runtime_cal`].
+pub const TEMP_BIN_HIGH: u8 = 0x10;
 
-/// Boot-info word0: h_ClkFreq=0x5000 (80 MHz FCLK), c_PwrModeAndXtalType=0x30
-/// (cold boot, 40 MHz XTAL), c_RfsApiCtrl=0x02 (RFS debug logger on; log
-/// appears at RFS_IPC+0x7C0).
+/// Cold boot at 80 MHz FCLK off the 40 MHz XTAL, with the RFS debug logger on
+/// (its log appears at `RFS_IPC + 0x7C0`).
 const BOOT_INFO_W0_FCLK: u32 = 0x0230_5000;
-/// Boot-info h_ClkFreq for 80 MHz FCLK (rfs_rfsClkCfg).
 const RFS_CLK_FREQ_80M: u32 = 20480;
 
-/// M3 un-halt magic (M_FE_RFS_CM3_FW_UNHALT_VAL).
 const CM3_UNHALT_MAGIC: u32 = 0xF5A3_6A17;
-/// FEC_CORE_SYSRESET_PARAM value that releases the M3.
 const FEC_CORE_UNHALT: u32 = 0x0002_17FF;
 
-// Busy-delay cycle counts at 200 MHz.
+// busy-delay cycle counts at 200 MHz
 const CYC_300US: u32 = 60_000;
 const CYC_500US: u32 = 100_000;
 
@@ -127,7 +118,7 @@ fn rmw(addr: usize, clear: u32, set: u32) {
     wr(addr, (rd(addr) & !clear) | set);
 }
 
-/// Poll `addr` until `(read & mask) == want`; false on timeout.
+/// Poll `addr` until `(read & mask) == want`, returning false on timeout.
 #[inline]
 fn wait_until(addr: usize, mask: u32, want: u32, tries: u32) -> bool {
     for _ in 0..tries {
@@ -138,14 +129,13 @@ fn wait_until(addr: usize, mask: u32, want: u32, tries: u32) -> bool {
     false
 }
 
-/// RFS M3 boot status (0x21200108 low byte).
+/// RFS M3 boot status.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BootStatus {
-    /// 0x00: still booting (or never released).
+    /// Still booting, or never released.
     Uninit,
-    /// 0x0A: booted OK.
     Pass,
-    /// 0x05: self-test failed.
+    /// Self-test failed.
     Fail,
     Other(u8),
 }
@@ -169,18 +159,17 @@ pub enum PowerError {
     MemInit,
 }
 
-// Domain transitions take ~hundreds of us; allow a few ms.
+// domain transitions take hundreds of us, so allow a few ms
 const POLL_TRIES: u32 = 1_000_000;
 
-/// Power the FEC domain, ungate its clocks, switch it to 80 MHz FCLK, and
-/// initialise the FECSS RAMs (fe_fecssOpen). Idempotent: power-cycles the
-/// domain to a known state. The RFS M3 stays halted; call [`rfs_boot`] next.
+/// Power the FEC domain, un-gate its clocks, switch it to 80 MHz FCLK and
+/// initialize the FECSS RAMs. Idempotent, since it power-cycles the domain to a
+/// known state. The RFS M3 stays halted, so call [`rfs_boot`] next.
 pub fn power_on() -> Result<(), PowerError> {
-    // Manual power mode, no RAM retention (cold start).
+    // manual power mode, no RAM retention
     rmw(FEC_PWR_REQ_PARAM, PWR_MODE_MANUAL, 0);
     rmw(PSCON_FEC_PD_RAM_STATE, 0x1, 0);
     rmw(PSCON_FEC_PD_GRP4_STATE, 0x3, 0);
-    // Power OFF, wait down; then ON, wait up.
     rmw(FEC_PWR_REQ_PARAM, PWR_WAKEUP_OUT, 0);
     if !wait_until(PSCON_FEC_PD_EN, 0x200, 0x200, POLL_TRIES) {
         return Err(PowerError::PowerDown);
@@ -196,18 +185,16 @@ pub fn power_on() -> Result<(), PowerError> {
     }
     asm::delay(CYC_300US);
 
-    // Ungate the FECSS root clock, then the IP clocks.
+    // root clock first, then the IP clocks
     wr(APP_FEC_CLK_GATE, 0);
     asm::delay(CYC_500US);
     wr(FEC_IPCFGCLKGATE0, IPCFGCLKGATE0_ON);
     wr(FEC_IPCFGCLKGATE1, IPCFGCLKGATE1_ON);
-    // Switch the FECSS system clock to FCLK BEFORE mem init and the RFS boot
-    // (as fe_fecssOpen does) so the RFS boots and runs its frame-service
-    // timing at 80 MHz. Divider field first, then source.
+    // switch to FCLK before mem init and the RFS boot, so the RFS runs its
+    // frame-service timing at 80 MHz
     rmw(FEC_SYS_CLKCTL, 0x0FFF_0000, FEC_FCLK_DIVR << 16);
     rmw(FEC_SYS_CLKCTL, 0x0000_FFF0, FEC_FCLK_SRCSEL << 4);
 
-    // Initialise the FECSS data + chirp-timer RAMs.
     wr(FECSS_TIMING_ENGINE_MEM_DONE, MEM_DONE); // clear done
     wr(FECSS_RAM_MEM_DONE, MEM_DONE);
     wr(FECSS_MEM_INIT_SLICE_SEL, 0x1);
@@ -226,15 +213,14 @@ pub fn boot_status() -> BootStatus {
     BootStatus::read()
 }
 
-/// Decoded RFS fault block (T_RL_API_RFS_FAULT_STS_GET_RSP at 0x21200120).
-/// h_RfsFwState: 0x8008 idle, 0x4004 booting, a cmd id while that command
-/// executes, 0xFFFF dead.
+/// Decoded RFS fault block.
 pub struct RfsFault {
+    /// 0x8008 idle, 0x4004 booting, 0xFFFF dead, or the id of a running command.
     pub fw_state: u16,
     pub patch: u8,
     /// 0x81 CPU fault, 0x82 FW assert.
     pub fault_type: u8,
-    /// e.g. 0x81 stray MBOX interrupt, 0x83 frame during cal/monitor.
+    /// For example 0x81 stray MBOX interrupt, 0x83 frame during cal.
     pub error_code: u8,
     pub line: u16,
     pub abort_pc: u32,
@@ -245,12 +231,14 @@ pub struct RfsFault {
 }
 
 impl RfsFault {
-    /// A faulted RFS is dead: it will never service frames again.
+    /// Report whether the RFS has faulted, in which case it is dead and will
+    /// never service frames again.
     pub fn is_faulted(&self) -> bool {
         self.fault_type != 0 || self.exception_count != 0
     }
 }
 
+/// Read and decode the RFS fault block.
 pub fn rfs_fault_status() -> RfsFault {
     let w0 = rd(RFS_IPC + 0x120);
     let w2 = rd(RFS_IPC + 0x128);
@@ -268,17 +256,16 @@ pub fn rfs_fault_status() -> RfsFault {
     }
 }
 
-/// Init the RFS mailbox, write boot-info, un-halt the RFS M3, poll boot
-/// status. Returns [`BootStatus::Uninit`] on timeout. Requires the RFS patch
-/// RPRC to be resident at 0x21204000 (the flash appimage bundles it; the ROM
-/// self-test never reaches Pass without it).
+/// Init the RFS mailbox, write boot-info, un-halt the RFS M3 and poll boot
+/// status, returning [`BootStatus::Uninit`] on timeout. Requires the RFS patch
+/// RPRC resident at 0x21204000, which the flash appimage bundles. Without it
+/// the ROM self-test never reaches [`BootStatus::Pass`].
 pub fn rfs_boot() -> BootStatus {
-    // Zero the 2 KB RFS IPC RAM: the RFS reads config mirrors from it.
+    // the RFS reads its config mirrors out of this RAM
     for i in 0..(0x800 / 4) {
         wr(RFS_IPC + i * 4, 0);
     }
 
-    // rfs_rfsMbInit: zero the mailbox, clear the trigger/busy regs.
     for i in 0..32 {
         wr(RFS_MAILBOX + i * 4, 0);
     }
@@ -288,14 +275,13 @@ pub fn rfs_boot() -> BootStatus {
 
     wr(RFS_BOOT_INFO, BOOT_INFO_W0_FCLK);
     wr(RFS_BOOT_INFO + 4, 0);
-    // Clear stale fault/boot status so an old 0xA can't pass the poll.
+    // clear stale status so an old 0xA cannot pass the poll
     rmw(RFS_CPU_FAULT_STS, 0x0000_FFFF, 0);
     rmw(RFS_BOOT_STS, 0x0000_00FF, 0);
-    // Un-halt the M3.
     wr(CM3_CPU_HALT_HANDSHAKE, CM3_UNHALT_MAGIC);
     wr(FEC_CORE_SYSRESET_PARAM, FEC_CORE_UNHALT);
 
-    // Boot takes ~120 us typical; budget ~2 ms.
+    // boot takes ~120 us typical, budget ~2 ms
     for _ in 0..200 {
         match BootStatus::read() {
             BootStatus::Uninit => asm::delay(2_000), // ~10 us
@@ -308,31 +294,27 @@ pub fn rfs_boot() -> BootStatus {
 /// Why a mailbox round-trip failed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MailboxError {
-    /// Busy flag set before send: a prior response was never consumed.
+    /// Busy flag set before send, so a prior response was never consumed.
     Busy,
     /// Payload exceeds the 124-byte mailbox.
     TooLarge,
     /// No response within the poll budget.
     Timeout,
-    /// RFS error response (cmd id echoed as 0), with its xw_CmdErrorCode.
+    /// RFS error response, carrying its error code.
     CmdError(i32),
-    /// Response cmd id didn't match the command sent.
+    /// Response cmd id did not match the command sent.
     Protocol { got: u16, resp_size: u16 },
 }
 
-/// One command over the RFS mailbox, polled (no IRQ 18): busy pre-check ->
-/// header + payload -> doorbell -> wait for COMPLETION -> read -> ack.
+/// Run one polled command over the RFS mailbox, copying up to `resp.len()`
+/// response words out and returning the response payload size in bytes.
 ///
-/// COMPLETION, not accept: both the busy bit and the 0x5200005C status byte
-/// are raised when the RFS *accepts* a command, but slow commands (cals,
-/// temp) finish tens of ms later. Completion = status byte set AND
-/// h_RfsFwState no longer holds this cmd id. Reading + acking at accept
-/// returns garbage and leaves the real completion unconsumed, after which the
-/// RFS FW-asserts ("stray MBOX interrupt") on the next doorbell or frame-start
-/// event.
-///
-/// On success up to `resp.len()` response words are copied out and the
-/// response payload size (bytes) is returned.
+/// Waits for completion rather than accept. Both the busy bit and the status
+/// byte are raised when the RFS merely accepts a command, but calibrations
+/// finish tens of ms later, so completion also requires that `fw_state` no
+/// longer holds this cmd id. Reading at accept returns garbage and leaves the
+/// real completion unconsumed, after which the RFS asserts on the next doorbell
+/// or frame-start event.
 pub fn mailbox_command(
     cmd_id: u16,
     payload: &[u32],
@@ -345,18 +327,18 @@ pub fn mailbox_command(
         return Err(MailboxError::Busy);
     }
 
-    // Header word0 = cmdId | (payload_bytes << 16), then the payload.
+    // header word0 is cmd_id | (payload_bytes << 16), then the payload
     let size_bytes = (payload.len() * 4) as u32;
     wr(RFS_MAILBOX, cmd_id as u32 | (size_bytes << 16));
     for (i, &w) in payload.iter().enumerate() {
         wr(RFS_MAILBOX + 4 + i * 4, w);
     }
 
-    // Clear stale response status, ring the doorbell (both RMW low byte).
+    // clear stale response status, then ring the doorbell
     rmw(FECSS_IPC_RFS, 0xFF, 0);
     rmw(IPC_CMD_TRIG, 0xFF, MB_SEND_TRIG);
 
-    // Wait for completion; ~2 s budget (calibrations are the slow ones).
+    // ~2 s budget, since calibrations are the slow ones
     let mut posted = false;
     for _ in 0..200_000 {
         if rd(FECSS_IPC_RFS) & 0xFF != 0 && rd(RFS_IPC + 0x120) & 0xFFFF != cmd_id as u32 {
@@ -369,10 +351,10 @@ pub fn mailbox_command(
         return Err(MailboxError::Timeout);
     }
     if rd(FECSS_IPC_BUSY_INT0) & 0x1 == 0 {
-        return Err(MailboxError::Timeout); // response-ready precondition (rfs_rfsResGet)
+        return Err(MailboxError::Timeout); // response-ready precondition
     }
 
-    // RFS echoes cmd_id on success, writes 0x0000 on error.
+    // the RFS echoes cmd_id on success and writes 0 on error
     let w0 = rd(RFS_MAILBOX);
     let got = (w0 & 0xFFFF) as u16;
     let resp_size = ((w0 >> 16) & 0xFFFF) as u16;
@@ -388,17 +370,16 @@ pub fn mailbox_command(
         Ok(resp_size)
     };
 
-    // Ack and clear busy so the next command can be sent.
+    // ack and clear busy so the next command can be sent
     rmw(IPC_CMD_TRIG, 0xFF, MB_READ_ACK);
     wr(FECSS_IPC_BUSY_INT0, 0x1);
     result
 }
 
-/// RF_PWR_ONOFF (0x0001): `rx_mask` bits[2:0] arm the RX chains, `tx_mask`
-/// bits[1:0] the TX chains, `misc` = c_MiscCtrl (bit0 RDIF clock - needs the
-/// APLL up first; bit1 1V LDO bypass). All-zero powers the RF off.
+/// Arm the RX chains in `rx_mask` and TX chains in `tx_mask`. In `misc`, bit 0
+/// is the RDIF clock, which needs the APLL up first, and bit 1 is the 1V LDO
+/// bypass. All-zero powers the RF off.
 pub fn rf_pwr_onoff(rx_mask: u16, tx_mask: u16, misc: u8) -> Result<(), MailboxError> {
-    // T_RL_API_FECSS_RF_PWR_CFG_CMD (12 B).
     let payload = [
         rx_mask as u32 | ((tx_mask as u32) << 16),
         (misc as u32) << 8,
@@ -407,25 +388,25 @@ pub fn rf_pwr_onoff(rx_mask: u16, tx_mask: u16, misc: u8) -> Result<(), MailboxE
     mailbox_command(CMD_RF_PWR_ONOFF, &payload, &mut []).map(|_| ())
 }
 
-/// Select the on-die temperature sensors for [`temp_trig`]. Plain RAM write
-/// of T_RL_API_FECSS_TEMP_MEAS_CMD; SDK uses 0x311 = RX + TX + PM + DIG.
+/// Select the on-die temperature sensors for [`temp_trig`]. 0x311 covers RX,
+/// TX, PM and DIG.
 pub fn temp_config(ctrl_mask: u16) {
     wr(RFS_TEMP_CFG, ctrl_mask as u32);
-    wr(RFS_TEMP_CFG + 4, 0); // struct is 8 B; remainder reserved
+    wr(RFS_TEMP_CFG + 4, 0); // remainder of the 8-byte struct is reserved
 }
 
 /// Result of a [`temp_trig`] measurement.
 pub struct TempMeas {
-    /// h_TempStsBitMask: 2 status bits per sensor (0b01 = valid).
+    /// Two status bits per sensor, where 0b01 is valid.
     pub status: u16,
-    /// Per-sensor deg C. Indices: RX0..2 = 0..2, TX0..1 = 4..5, PM = 8, DIG = 9.
+    /// Per-sensor deg C, indexed RX0..2 at 0..2, TX0..1 at 4..5, PM 8, DIG 9.
     pub temp_c: [i16; 10],
 }
 
-/// TEMP_TRIG (0x0007): measure the sensors selected by [`temp_config`].
-/// Needs the RF/PM analog powered for meaningful numbers.
+/// Measure the sensors selected by [`temp_config`]. Needs the RF and PM analog
+/// powered for meaningful numbers.
 pub fn temp_trig() -> Result<TempMeas, MailboxError> {
-    let mut resp = [0u32; 7]; // T_RL_API_FECSS_TEMP_MEAS_RSP = 28 B
+    let mut resp = [0u32; 7];
     mailbox_command(CMD_TEMP_TRIG, &[], &mut resp)?;
     let mut temp_c = [0i16; 10];
     for (i, t) in temp_c.iter_mut().enumerate() {
@@ -443,7 +424,7 @@ pub fn temp_trig() -> Result<TempMeas, MailboxError> {
     })
 }
 
-/// RUNTIME_CAL temperature bin for a measured temperature.
+/// Pick the [`runtime_cal`] temperature bin for a measured temperature.
 pub fn temp_bin_for(temp_c: i16) -> u8 {
     if temp_c < 0 {
         TEMP_BIN_LOW
@@ -454,10 +435,9 @@ pub fn temp_bin_for(temp_c: i16) -> u8 {
     }
 }
 
-/// APLL_CLK_CTRL (0x0003): configure the FECSS clocks and bring up the APLL.
-/// Three ordered actions like SDK rl_fecssDevClockCtrl: (1) M4-side FECSS
-/// core-clock switch + RFS clock-freq hint, (2) un-gate the FRC OSC clock -
-/// what delivers frame-start events into the FECSS, (3) the mailbox command.
+/// Configure the FECSS clocks and bring up the APLL. Order matters: the M4-side
+/// core-clock switch and RFS clock hint, then the FRC OSC un-gate, then the
+/// mailbox command.
 pub fn apll_clk_ctrl(dev_clk: u8, ft_clk: u8, apll: u8) -> Result<(), MailboxError> {
     if dev_clk == DEV_CLK_FCLK {
         rmw(FEC_SYS_CLKCTL, 0x0FFF_0000, FEC_FCLK_DIVR << 16);
@@ -468,7 +448,6 @@ pub fn apll_clk_ctrl(dev_clk: u8, ft_clk: u8, apll: u8) -> Result<(), MailboxErr
         FRC_OSC_CLK_GATE,
         if ft_clk == FT_CLK_XTAL { 0 } else { 0x7 },
     );
-    // T_RL_API_FECSS_DEV_CLK_CTRL_CMD (8 B).
     let payload = [
         dev_clk as u32 | ((ft_clk as u32) << 8) | ((apll as u32) << 16),
         0,
@@ -476,29 +455,26 @@ pub fn apll_clk_ctrl(dev_clk: u8, ft_clk: u8, apll: u8) -> Result<(), MailboxErr
     mailbox_command(CMD_APLL_CLK_CTRL, &payload, &mut []).map(|_| ())
 }
 
-/// APLL up with calibration, SDK cold-boot clock config (FECSS on FCLK,
-/// frame timer on XTAL). Must follow [`rf_pwr_onoff`], precede calibration.
+/// Bring the APLL up with calibration, FECSS on FCLK and frame timer on XTAL.
+/// Must follow [`rf_pwr_onoff`] and precede calibration.
 pub fn apll_on() -> Result<(), MailboxError> {
     apll_clk_ctrl(DEV_CLK_FCLK, FT_CLK_XTAL, APLL_ON_CAL)
 }
 
 /// Result of [`fact_cal`] / [`runtime_cal`].
 pub struct CalStatus {
-    /// h_CalRunStatus: this trigger's per-cal result bits; equals the
-    /// requested mask ([`CAL_MASK_COLDBOOT`]) on success.
+    /// This trigger's per-cal result bits, equal to the requested mask on success.
     pub run_status: u16,
-    /// h_CalResStatus: cumulative cal validity bits.
+    /// Cumulative cal validity bits.
     pub res_status: u16,
-    /// Temperature at calibration, deg C ([`fact_cal`] only).
+    /// Temperature at calibration in deg C, set by [`fact_cal`] only.
     pub calib_temp_c: i16,
 }
 
-/// FACT_CAL (0x0002) with the SDK factory_cal.c parameters: RxGain 0x28
-/// (40 dB), TxBackoff 0, CalRfFreq = band center, TxPwrCal masks {3,1}. Other
-/// parameter sets leave res_status without its validity bits, and the RFS then
-/// asserts on the first frame-start. Must follow [`apll_on`].
+/// Run the factory calibration. Must follow [`apll_on`]. The parameters are
+/// fixed: other sets leave `res_status` without its validity bits, and the RFS
+/// then asserts on the first frame-start.
 pub fn fact_cal() -> Result<CalStatus, MailboxError> {
-    // T_RL_API_FECSS_RF_FACT_CAL_CMD (36 B).
     let payload = [
         0x2800_00CE, // CalCtrl 0xCE | MiscCal 0x00 | RxGainSel 0x28
         0x0000_0000, // CalTxBackOffSel[4]
@@ -510,7 +486,7 @@ pub fn fact_cal() -> Result<CalStatus, MailboxError> {
         0x0000_0000,
         0x0000_0000,
     ];
-    let mut resp = [0u32; 3]; // T_RL_API_FECSS_RF_FACT_CAL_RSP = 12 B
+    let mut resp = [0u32; 3];
     mailbox_command(CMD_FACT_CAL, &payload, &mut resp)?;
     Ok(CalStatus {
         run_status: (resp[0] & 0xFFFF) as u16,
@@ -519,12 +495,10 @@ pub fn fact_cal() -> Result<CalStatus, MailboxError> {
     })
 }
 
-/// RUNTIME_CAL (0x0004) for `temp_bin` ([`temp_bin_for`]). Needs a prior
-/// [`fact_cal`]. Mask 0xCA = no PD cal: the SDK enables runtime PD cal only
-/// for safety/CLPC apps, and requesting it with no monitor configured asserts
-/// the RFS.
+/// Run the runtime calibration for `temp_bin`, which [`temp_bin_for`] picks.
+/// Needs a prior [`fact_cal`]. The mask omits the PD cal, since requesting it
+/// with no monitor configured asserts the RFS.
 pub fn runtime_cal(temp_bin: u8) -> Result<CalStatus, MailboxError> {
-    // T_RL_API_FECSS_RF_RUN_CAL_CMD (20 B).
     let payload = [0x00CA_u32, temp_bin as u32, 0, 0, 0];
     let mut resp = [0u32; 3];
     mailbox_command(CMD_RUNTIME_CAL, &payload, &mut resp)?;

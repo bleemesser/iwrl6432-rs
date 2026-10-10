@@ -5,21 +5,18 @@ use crate::pac;
 /// Poll magic the host master writes to request a batch.
 pub const CMD_POLL: u32 = 0xC0FF_EE01;
 
-/// Max words per batch (24.8 KB, 7 chirps of the largest 3264 B chunk).
-/// Streaming is frame-paced: chirps arrive in per-frame clumps that the
-/// capture ring absorbs, and the link drains 2 batches per frame; RAM spent
-/// on ring slots (clump headroom) beats RAM spent on batch size.
+/// Max words per batch, sized for 8 chirps of the largest 3032 B chunk. The
+/// link drains 2 batches per frame, so RAM is better spent on ring slots than
+/// on a bigger batch.
 pub const TX_BUF_WORDS: usize = 6208;
 
-// Batch double buffer. The stream task writes a half only while it is not
-// armed and not being served; the ISR reads a half only between arm() and
-// push completion.
+// the task writes a half only while it is neither armed nor being served, and
+// the ISR reads a half only between arm() and push completion
 static mut TX_BUF: [[u32; TX_BUF_WORDS]; 2] = [[0; TX_BUF_WORDS]; 2];
-/// Armed batch length in words per buffer; 0 = free for building.
+/// Armed batch length in words per buffer, 0 when free for building.
 static ARMED_LEN: [AtomicUsize; 2] = [AtomicUsize::new(0), AtomicUsize::new(0)];
 const NO_BUF: usize = 2;
-/// Buffer currently being pushed by the ISR (NO_BUF when idle or serving
-/// the canned empty header).
+/// Buffer the ISR is pushing, `NO_BUF` when idle or serving the empty header.
 static SERVING: AtomicUsize = AtomicUsize::new(NO_BUF);
 static NEXT_SERVE: AtomicUsize = AtomicUsize::new(0); // ISR-owned
 static NEXT_BUILD: AtomicUsize = AtomicUsize::new(0); // task-owned
@@ -29,31 +26,27 @@ static TX_SRC: AtomicUsize = AtomicUsize::new(0);
 static TX_LEN: AtomicUsize = AtomicUsize::new(0);
 static TX_POS: AtomicUsize = AtomicUsize::new(0);
 
-/// Response to a poll with no armed batch: 5A A5 | total=0 | first_seq=0.
+/// Response to a poll with no armed batch.
 static EMPTY_HDR: [u32; 2] = [0x5AA5_0000, 0];
 
 static SERVED: AtomicU32 = AtomicU32::new(0);
 static EMPTY_POLLS: AtomicU32 = AtomicU32::new(0);
-/// Recognized polls since boot (any poll whose magic landed word-aligned in
-/// RX0). Freezes when the slave's word framing is desynced by a host that
-/// abandoned a transaction mid-cycle; the idle watchdog samples this.
+/// Polls whose magic landed word-aligned in RX0. Freezes once word framing
+/// desyncs, which is how the idle watchdog spots a wedge.
 static POLLS: AtomicU32 = AtomicU32::new(0);
-/// Polls that arrived while a previous batch was still being pushed: the
-/// host gave up on it (read window passed); the batch is restarted.
+/// Polls that arrived mid-push, meaning the host gave up and the batch restarts.
 static RETRIES: AtomicU32 = AtomicU32::new(0);
-// Feed-ISR invocations that found the TX FIFO completely empty mid-push
-// (words still pending, not at prime): true starvation, the master may have
-// clocked garbage. The TX0_UNDERFLOW status latch is unusable for this: it
-// also sets benignly at end-of-transfer (shift-register preload after the
-// last word).
+// TX0_UNDERFLOW is unusable for this, since it also sets benignly at
+// end-of-transfer when the shift register preloads after the last word
 static TX_STARVED: AtomicU32 = AtomicU32::new(0);
 
 const IRQ_TX_EMPTY: u32 = 1 << 0;
 const IRQ_TX_UNDERFLOW: u32 = 1 << 1;
 const IRQ_RX_FULL: u32 = 1 << 2;
 
-/// Bring up MCSPIA as an SPI-mode-0 slave (inverted-gate clock convention,
-/// 40 MHz OSC /1). Poll detection (RX interrupt) is live on return.
+/// Bring up MCSPIA as an SPI-mode-0 slave on channel 0, CS active-low, 32-bit
+/// words. Poll detection is live from here on. Reaches the J2 header only with
+/// board switch S1.6 on, which also steals GPIO5/USER_LED.
 pub fn init(dp: &pac::Peripherals) {
     dp.app_rcm
         .ipcfgclkgate1()
@@ -62,7 +55,7 @@ pub fn init(dp: &pac::Peripherals) {
         .app_spi_clkctl()
         .modify(|r, w| unsafe { w.bits(r.bits() & !0x0FFF_FFFF) });
 
-    // Pads, all function 0 = MCSPIA: AG=CLK, AI=MOSI, AJ=MISO, AH=CS0.
+    // function 0 is MCSPIA: AG is CLK, AI MOSI, AJ MISO, AH CS0
     use crate::pinmux::{Pad, configure, pad_cfg};
     configure(dp, Pad::Ag, pad_cfg(0));
     configure(dp, Pad::Ai, pad_cfg(0));
@@ -77,24 +70,17 @@ pub fn init(dp: &pac::Peripherals) {
 
     spi.modulctrl().write(|w| unsafe { w.bits(1 << 2) }); // slave (MS=1)
 
-    // Ch0: mode 0, EPOL=1 (CS active low), WL=31 (32-bit), TRM=TX+RX,
-    // DPE1=1 (TX on D0), IS=1 (RX on D1), FFEW=1 (TX FIFO).
+    // EPOL, WL=31, TRM=TX+RX, DPE1 (TX on D0), IS (RX on D1), FFEW
     spi.ch0conf()
         .write(|w| unsafe { w.bits((1 << 6) | (31 << 7) | (1 << 17) | (1 << 18) | (1 << 27)) });
-    // TX almost-empty trigger: TX0_EMPTY fires when the FIFO content drops
-    // to <= AEL bytes. 31 = half-FIFO: 12.8 us of feed headroom at 20 MHz
-    // (tx_starved() counts misses), and a low enough refill-IRQ rate
-    // (~1/13 us during reads) that the chirp-copy ISR at prio 0x80 still
-    // meets the 136 us intra-burst chirp spacing; at AEL=47 the doubled
-    // IRQ overhead made big-chirp profiles lose chirp interrupts.
+    // half-FIFO almost-empty trigger, giving 12.8 us of feed headroom at 20 MHz
+    // without the refill-IRQ rate starving the chirp-copy ISR (AEL=47 loses chirps)
     spi.xferlevel().write(|w| unsafe { w.bits(31) });
 
     spi.ch0ctrl().write(|w| unsafe { w.bits(1) }); // enable channel
 
-    // The SPI ISR must preempt everything: the chirp-copy ISR alone runs
-    // ~25 us, longer than the 64-byte FIFO lasts at 15+ MHz, and the poll
-    // response is primed in this ISR too. SPI stays at NVIC priority 0;
-    // chirp-avail (34), console SCI (62) and RTI (43) drop to 0x80.
+    // SPI stays at priority 0 and must preempt everything, since the chirp-copy
+    // ISR alone runs ~25 us, longer than the 64-byte FIFO lasts at 15+ MHz
     const NVIC_IPR: usize = 0xE000_E400;
     for irq in [34u8, 62, 43] {
         unsafe { core::ptr::write_volatile((NVIC_IPR + irq as usize) as *mut u8, 0x80) };
@@ -105,28 +91,28 @@ pub fn init(dp: &pac::Peripherals) {
     unsafe { cortex_m::peripheral::NVIC::unmask(pac::Interrupt::APPSS_SPI_IRQ_REQ) };
 }
 
-/// The buffer the stream task should build the next batch into, if free.
-/// `None` while both halves are armed/serving; retry after a yield.
+/// Get the buffer to build the next batch into, or `None` while both halves are
+/// armed or serving, in which case retry after a yield.
 pub fn build_slot() -> Option<&'static mut [u32; TX_BUF_WORDS]> {
     let nb = NEXT_BUILD.load(Ordering::Relaxed);
     if ARMED_LEN[nb].load(Ordering::Acquire) == 0 && SERVING.load(Ordering::Acquire) != nb {
-        // Safe: the ISR only touches armed buffers, and this one is not.
+        // sound because the ISR only touches armed buffers, and this one is not
         Some(unsafe { &mut (*(&raw mut TX_BUF))[nb] })
     } else {
         None
     }
 }
 
-/// Arm the batch built in the last [`build_slot`] (`len` words) for the ISR
-/// to serve on the next poll, and advance the build cursor.
+/// Arm the `len`-word batch built in the last [`build_slot`] for the ISR to
+/// serve on the next poll, and advance the build cursor.
 pub fn arm(len: usize) {
     let nb = NEXT_BUILD.load(Ordering::Relaxed);
     ARMED_LEN[nb].store(len, Ordering::Release);
     NEXT_BUILD.store(nb ^ 1, Ordering::Relaxed);
 }
 
-/// Drop armed-but-unserved batches (live reconfigure: their lengths/seqs are
-/// stale) and realign the build cursor with the serve cursor.
+/// Drop armed-but-unserved batches and realign the build cursor with the serve
+/// cursor. Used on a live reconfigure, where their lengths and seqs go stale.
 pub fn flush_armed() {
     let s = SERVING.load(Ordering::Acquire);
     for (i, a) in ARMED_LEN.iter().enumerate() {
@@ -144,8 +130,7 @@ pub fn flush_armed() {
     );
 }
 
-/// `(pushed words, batch words)` of the in-flight push; equal when idle.
-/// The stream task's stall watchdog samples this.
+/// Report `(pushed words, batch words)` of the in-flight push, equal when idle.
 pub fn push_progress() -> (usize, usize) {
     (
         TX_POS.load(Ordering::Relaxed),
@@ -153,26 +138,20 @@ pub fn push_progress() -> (usize, usize) {
     )
 }
 
-/// `true` while the ISR is pushing a real (non-empty-header) batch.
+/// Report whether the ISR is pushing a real batch rather than the empty header.
 pub fn is_serving() -> bool {
     SERVING.load(Ordering::Acquire) != NO_BUF
 }
 
-/// `true` if any batch is armed (including one currently being served).
+/// Report whether any batch is armed, including one being served.
 pub fn any_armed() -> bool {
     ARMED_LEN.iter().any(|a| a.load(Ordering::Acquire) != 0)
 }
 
-/// Flush the channel and go back to poll-listening; `reset_channel` re-aligns
-/// the shift register to the next CS frame. The armed batch is kept and
-/// re-served on the next poll. Recovers both wedges the stream task watches
-/// for: a host that stopped clocking mid-batch and never re-polled (e.g. the
-/// capture tool was killed), and a slave whose word framing desynced after a
-/// host abandoned a transaction mid-cycle, so the poll magic no longer lands
-/// word-aligned and the ISR never recognizes another poll. Harmless when the
-/// port is merely idle (empty FIFOs), but it discards an in-flight push, so
-/// only call once [`push_progress`] has been stalled for a long time or
-/// [`is_serving`] is false.
+/// Flush the channel and go back to poll-listening, re-aligning the shift
+/// register to the next CS frame. The armed batch is kept and re-served on the
+/// next poll. This discards an in-flight push, so only call it once
+/// [`push_progress`] has been stalled a long time or [`is_serving`] is false.
 pub fn force_idle() {
     let spi = unsafe { &*pac::AppSpi0::PTR };
     spi.irqenable().write(|w| unsafe { w.bits(0) });
@@ -184,34 +163,33 @@ pub fn force_idle() {
     spi.irqenable().write(|w| unsafe { w.bits(IRQ_RX_FULL) });
 }
 
-/// Recognized polls since boot (see `POLLS`). The stream task's idle watchdog
-/// samples this to detect a framing-desynced slave that will never see another
-/// poll and re-inits the channel.
+/// Count recognized polls since boot.
 pub fn polls() -> u32 {
     POLLS.load(Ordering::Relaxed)
 }
 
-/// Completed (fully pushed) non-empty batches since boot.
+/// Count fully pushed non-empty batches since boot.
 pub fn served() -> u32 {
     SERVED.load(Ordering::Relaxed)
 }
 
-/// Polls answered with the canned empty header (no batch armed).
+/// Count polls answered with the empty header because no batch was armed.
 pub fn empty_polls() -> u32 {
     EMPTY_POLLS.load(Ordering::Relaxed)
 }
 
-/// Batches restarted because the host re-polled mid-push (see `RETRIES`).
+/// Count batches restarted because the host re-polled mid-push.
 pub fn retries() -> u32 {
     RETRIES.load(Ordering::Relaxed)
 }
 
-/// Mid-push TX FIFO starvation events since boot (see `TX_STARVED`).
+/// Count mid-push TX FIFO starvations since boot, where the master may have
+/// clocked garbage.
 pub fn tx_starved() -> u32 {
     TX_STARVED.load(Ordering::Relaxed)
 }
 
-/// Disable + re-enable channel 0, flushing both FIFOs and the shift register.
+/// Cycle channel 0, flushing both FIFOs and the shift register.
 pub fn reset_channel() {
     let spi = unsafe { &*pac::AppSpi0::PTR };
     spi.ch0ctrl().write(|w| unsafe { w.bits(0) });
@@ -219,9 +197,9 @@ pub fn reset_channel() {
     spi.ch0ctrl().write(|w| unsafe { w.bits(1) });
 }
 
-/// Push from the in-flight source into the TX FIFO until full or done. At
-/// push completion the consumed buffer is released and the ISR goes back to
-/// poll-listening (the FIFO tail drains without further help).
+/// Push from the in-flight source into the TX FIFO until full or done. On
+/// completion the consumed buffer is released and the ISR returns to
+/// poll-listening, since the FIFO tail drains without further help.
 fn push(spi: &pac::app_spi_0::RegisterBlock) {
     let src = TX_SRC.load(Ordering::Relaxed) as *const u32;
     let len = TX_LEN.load(Ordering::Relaxed);
@@ -239,8 +217,7 @@ fn push(spi: &pac::app_spi_0::RegisterBlock) {
             NEXT_SERVE.store(cur ^ 1, Ordering::Relaxed);
             SERVED.fetch_add(1, Ordering::Relaxed);
         }
-        // Ack TX and any RX-full latched while pushing, then listen for the
-        // next poll (RX events; the last <=64 B drain by themselves).
+        // ack TX and any RX-full latched while pushing, then listen for the next poll
         spi.irqstatus()
             .write(|w| unsafe { w.bits(IRQ_TX_EMPTY | IRQ_RX_FULL) });
         spi.irqenable().write(|w| unsafe { w.bits(IRQ_RX_FULL) });
@@ -250,13 +227,14 @@ fn push(spi: &pac::app_spi_0::RegisterBlock) {
     }
 }
 
-/// SPI ISR: poll detection + response prime + TX FIFO refill.
+/// Detect polls, prime the response and refill the TX FIFO. Serving the whole
+/// protocol from the ISR keeps response latency independent of executor state.
 #[unsafe(no_mangle)]
 extern "C" fn APPSS_SPI_IRQ_REQ() {
     let spi = unsafe { &*pac::AppSpi0::PTR };
 
-    // Drain received words; only the poll magic means anything (the host's
-    // read clocks shift junk into RX0, and reading keeps RXS from sticking).
+    // the host's read clocks shift junk into RX0, so only the magic means
+    // anything, and draining keeps RXS from sticking
     let mut poll = false;
     while spi.ch0stat().read().rxs().bit_is_set() {
         if spi.rx0().read().bits() == CMD_POLL {
@@ -266,16 +244,13 @@ extern "C" fn APPSS_SPI_IRQ_REQ() {
 
     if poll {
         POLLS.fetch_add(1, Ordering::Relaxed);
-        // A poll while a push is outstanding means the host abandoned that
-        // read; restart the same batch (still armed).
+        // a poll mid-push means the host abandoned that read, so restart the batch
         if SERVING.load(Ordering::Relaxed) != NO_BUF {
             RETRIES.fetch_add(1, Ordering::Relaxed);
         }
-        // Let the poll write's CS frame end before resetting the channel.
-        // Keep this SHORT: it blocks at NVIC prio 0, and chirp IRQs whose
-        // entry is delayed past the intra-burst chirp spacing pend-merge and
-        // flip the ping/pong parity (full-Doppler "blast" corruption). The
-        // batched-MPSSE host deasserts CS sub-us after the poll's last byte.
+        // let the poll write's CS frame end before resetting the channel. keep this
+        // short, since it blocks at priority 0 and chirp IRQs delayed past the
+        // intra-burst spacing pend-merge and flip the ping/pong parity
         cortex_m::asm::delay(crate::clock::CORE_CLK_HZ / 200_000); // ~5 us
         reset_channel();
         let nb = NEXT_SERVE.load(Ordering::Relaxed);
@@ -297,7 +272,7 @@ extern "C" fn APPSS_SPI_IRQ_REQ() {
         return;
     }
 
-    // FIFO completely empty mid-push = the feed lost the race.
+    // an empty FIFO mid-push means the feed lost the race
     let (pos, len) = (
         TX_POS.load(Ordering::Relaxed),
         TX_LEN.load(Ordering::Relaxed),

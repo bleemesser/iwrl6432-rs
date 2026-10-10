@@ -1,3 +1,5 @@
+// the 3-bit per-peripheral clock-gate fields are inverted: 0x0 enables, 0x7 (reset) gates
+
 use crate::pac;
 
 /// Board crystal (40 MHz): source for the UART and RTI functional clocks.
@@ -10,7 +12,7 @@ pub const UART_CLK_HZ: u32 = XTAL_HZ;
 pub const RTI_CLK_HZ: u32 = XTAL_HZ;
 
 /// Lock the digital PLL and run the M4 (and its peripheral clock tree) from it.
-/// Call once, first: until it runs, peripheral accesses bus-fault.
+/// Call once, before anything else. Peripheral accesses bus-fault until it runs.
 pub fn init_core(dp: &pac::Peripherals) {
     const LOCKMON: u32 = 1 << 8; // PLLDIG_STATUS lock bit
     if dp.plldig_ctrl.plldig_status().read().bits() & LOCKMON == 0 {
@@ -28,8 +30,7 @@ pub fn init_core(dp: &pac::Peripherals) {
         while dp.plldig_ctrl.plldig_status().read().bits() & LOCKMON == 0 {}
     }
 
-    // M4 clock source -> PLL: APP_CPU_CLKCTL.SRCSEL [15:4] = 0x333; then wait for
-    // APP_CPU_CLKSTAT.CURRCLK [11:4] == 0x8 (APLL/DPLL).
+    // M4 clock source to PLL, then wait for CURRCLK to read 0x8 (APLL/DPLL)
     dp.app_rcm
         .app_cpu_clkctl()
         .modify(|r, w| unsafe { w.bits((r.bits() & !0x0000_FFF0) | (0x333 << 4)) });
@@ -56,15 +57,11 @@ pub fn enable_gpio(dp: &pac::Peripherals) {
         .modify(|r, w| unsafe { w.bits(r.bits() & !0x0000_0007) });
 }
 
-/// Un-gate the HWASS functional clock: `IPCFGCLKGATE2.HWASS` [8:6] -> 0.
-///
-/// The ADCBUF and its 160 KB backing RAM live in the HWASS domain. With this
-/// gated the config bus still works but the DFE's ADC writes never commit
-/// (the buffer reads as static power-on RAM). Pair with
+/// Un-gate the HWASS functional clock, which backs the ADCBUF. While gated the
+/// config bus still works but the DFE's ADC writes never commit. Pair with
 /// [`crate::sensor::hwass_mem_init`] before capturing.
 pub fn enable_hwass(dp: &pac::Peripherals) {
-    // Two enables: IPCFGCLKGATE2.HWASS [8:6] = 0 (inverted, 0 = ungated; must
-    // not be pulsed) and APP_CTRL.HWASS_CLK_GATE [2:0] = 0x7.
+    // two separate enables, and the IPCFGCLKGATE2 field must not be pulsed
     dp.app_rcm
         .ipcfgclkgate2()
         .modify(|r, w| unsafe { w.bits(r.bits() & !0x0000_01C0) });
@@ -81,8 +78,8 @@ pub fn enable_rti(dp: &pac::Peripherals) {
         .modify(|r, w| unsafe { w.bits(r.bits() & !0x001C_0000) });
 }
 
-/// Errata ANA-52 (PG1 silicon only): clear the Slicer LDO TLOAD after the
-/// oscillator is up. Gated on the PG eFuse; a no-op on PG != 1 silicon.
+/// Apply errata ANA-52: clear the Slicer LDO TLOAD once the oscillator is up.
+/// PG1 silicon only, a no-op elsewhere.
 fn errata_ana52_ldo() {
     const EFUSE0_ROW_18: *const u32 = (0x5A02_0000 + 0x38) as *const u32;
     const LDO_CLKTOP: *mut u32 = 0x5A04_0520 as *mut u32;

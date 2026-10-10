@@ -11,3 +11,6 @@ Local changes on top of the upstream generation:
   LICENSE-TI). The `rt` feature enables it.
 - Generation inputs (SVD XML, sanitize script, single-file lib.rs) removed;
   regenerate from the upstream repo if ever needed.
+
+The `repository` and `homepage` fields point at this workspace because that is
+where the fork lives. Upstream is `abeanater/xwrl64xx-pac`.

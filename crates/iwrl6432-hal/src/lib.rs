@@ -16,13 +16,12 @@ pub mod uart;
 
 pub use uart::Uart;
 
-/// Undo the non-default state the ROM bootloader hands off in. Call first
-/// thing in `main`, before enabling any interrupt.
+/// Undo the non-default state the ROM bootloader hands off in. Call first thing
+/// in `main`, before enabling any interrupt.
 ///
-/// The ROM bootloader leaves: `CCR.UNALIGN_TRP` + `DIV_0_TRP` set (a normal
-/// unaligned access in `core::fmt` then UsageFaults), `FAULTMASK` set (no
-/// interrupt can ever fire), the WIC enabled with a latched wakeup, and stray
-/// NVIC/SysTick enables + pendings. Only needed on flash boots.
+/// Clears `CCR.UNALIGN_TRP` and `DIV_0_TRP`, `FAULTMASK`, the WIC enable and its
+/// latched wakeup, and stray NVIC/SysTick enables and pendings. Only needed on
+/// flash boots.
 #[inline]
 pub fn normalize_after_bootloader() {
     const CCR: usize = 0xE000_ED14; // UNALIGN_TRP=b3, DIV_0_TRP=b4
@@ -39,7 +38,7 @@ pub fn normalize_after_bootloader() {
         core::ptr::write_volatile(WICEN as *mut u32, 0);
         core::ptr::write_volatile(SYST_CSR as *mut u32, 0);
         core::ptr::write_volatile(ICSR as *mut u32, (1 << 25) | (1 << 27));
-        // Disable + clear-pending all 64 external interrupt lines.
+        // disable and clear-pending all 64 external interrupt lines
         for i in 0..2 {
             core::ptr::write_volatile((NVIC_ICER + i * 4) as *mut u32, 0xFFFF_FFFF);
             core::ptr::write_volatile((NVIC_ICPR + i * 4) as *mut u32, 0xFFFF_FFFF);

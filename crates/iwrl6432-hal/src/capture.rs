@@ -7,44 +7,36 @@ use crate::sensor;
 /// On-device sample encoding applied in the drain ISR.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Format {
-    /// 2 samples -> 3 bytes (12-bit two's complement), exact for in-range
-    /// samples. Out-of-range samples (never seen from the 12-bit ADC) alias;
-    /// counted in [`out_of_range`]. The baseline streaming format.
+    /// Baseline format, packing 2 samples into 3 bytes of 12-bit two's
+    /// complement. Out-of-range samples alias and are counted by
+    /// [`out_of_range`].
     Packed12,
-    /// Random subsampling for host-side compressed-sensing reconstruction:
-    /// of every 16 sample pairs, keep `k` (1..=15), Packed12-encoded. The
-    /// kept-pair mask is derived from `seq` alone ([`mask_fill`]), so the
-    /// host regenerates it with no index side-channel; wire rate scales by
-    /// k/16 and the reconstructed profile loses 10*log10(16/k) dB SNR.
+    /// Random subsampling for host-side compressed-sensing reconstruction,
+    /// keeping `k` of every 16 sample pairs, Packed12-encoded. Wire rate
+    /// scales by k/16 and the reconstruction loses `10*log10(16/k)` dB SNR.
     Sub12(u8),
-    /// Block floating point: 16-sample blocks share a 0..4 shift exponent
-    /// (1 byte) followed by 16 round-to-nearest int8 mantissas = 17 B per
-    /// block, 1.41x smaller than Packed12. Exact when the block max is
-    /// < 128; otherwise quantization sits ~48 dB below the block peak
-    /// (measured on real captures: ~78 dB spectrum PSNR, no MTI floor rise).
+    /// Block floating point, 1.41x smaller than Packed12. Each 16-sample block
+    /// is a shared 0..4 shift exponent byte plus 16 int8 mantissas. Exact when
+    /// the block max is under 128, otherwise quantization sits ~48 dB below the
+    /// block peak.
     Bfp16,
 }
 
-/// Mask granularity for [`Format::Sub12`]: pairs are drawn per block of
-/// this many, so kept samples stay spread across the chirp.
+/// Mask granularity for [`Format::Sub12`]. Pairs are drawn per block of this
+/// many, which stratifies the draw so kept samples never cluster badly.
 pub const SUB12_BLOCK_PAIRS: usize = 16;
 
-/// Ring capacity in chirps. 19 x 3264 B = 62 KB of APPSS RAM (RAM3 is
-/// 128 KB total, shared with the two SPI batch buffers and the stack).
-/// Must absorb a whole frame's chirp clump: profiles emit chirps in bursts
-/// (e.g. 16 chirps in 8 ms of a 40 ms frame), and the SPI link drains at
-/// most one batch per host poll cycle in the gaps.
+/// Ring capacity in chirps, 62 KB of the 128 KB APPSS RAM3 shared with the SPI
+/// batch buffers and the stack. Must absorb a whole frame's chirp clump, since
+/// the link only drains in the gaps between bursts.
 const RING_CHIRPS: usize = 19;
-/// Per-chirp storage; `init` asserts the configured geometry fits.
-/// 3264 allows 1024 samples x 3 RX Bfp16, 680 x 3 packed 12-bit, keep 7/16
-/// at 1536 samples (3024 B) or keep 5/16 at 2048 (2880 B). Consumers size
-/// their pop buffers with this.
+/// Per-chirp storage, which [`init`] asserts the configured geometry fits.
+/// Consumers size their pop buffers with this.
 pub const MAX_CHIRP_BYTES: usize = 3264;
 
-// Lock-free SPSC ring: the chirp ISR is the only producer, the streaming
-// task the only consumer. No critical section is held during the (up to
-// ~70 us) copy/pack, so the higher-priority SPI feed ISR can preempt it -
-// holding PRIMASK that long underruns the 20 MHz TX FIFO.
+// lock-free SPSC: the chirp ISR is the only producer, the streaming task the
+// only consumer. no critical section is held during the pack, since holding
+// PRIMASK that long underruns the 20 MHz TX FIFO
 struct RingCell(core::cell::UnsafeCell<Ring>);
 unsafe impl Sync for RingCell {}
 static RING: RingCell = RingCell(core::cell::UnsafeCell::new(Ring::new()));
@@ -56,45 +48,29 @@ static DROPPED: AtomicU32 = AtomicU32::new(0);
 static SEEN: AtomicU32 = AtomicU32::new(0);
 static OOR: AtomicU32 = AtomicU32::new(0);
 static GENERATION: AtomicU32 = AtomicU32::new(0);
-// ISR timing diagnostics (40 MHz RTI ticks; the DWT CYCCNT is not
-// implemented on this M4), reset by `init`: worst-case wall-clock time spent
-// in one chirp ISR (including SPI-feed preemption), and how many chirp IRQs
-// ran QUEUED (entered within 10 us of the previous ISR's exit, i.e. they
-// pended while the previous chirp was still packing - a backlog that can
-// run the ADCBUF read into the next overwrite).
+// ISR timing in 40 MHz RTI ticks, since this M4 has no DWT CYCCNT. QUEUED
+// counts entries within 10 us of the previous exit, a backlog that can run the
+// ADCBUF read into the next overwrite
 static PACK_MAX_CYC: AtomicU32 = AtomicU32::new(0);
 static QUEUED: AtomicU32 = AtomicU32::new(0);
 static LAST_EXIT_CYC: AtomicU32 = AtomicU32::new(0);
-// Chirps discarded because the DFE started rewriting the ADCBUF half while
-// the ISR was still reading it (detected by word 0 changing under us - the
-// DFE refills a half from word 0). Shipping such a chirp poisons the whole
-// frame's Doppler with noise that grows along fast time.
+// chirps dropped because the DFE rewrote the ADCBUF half mid-read. shipping one
+// poisons the frame's Doppler with noise that grows along fast time
 static TORN: AtomicU32 = AtomicU32::new(0);
-// Hardware seq resync (see the validation block in the ISR): the NVIC pends
-// at most one chirp IRQ, so when the ISR is stretched past two chirp
-// completions (SPI-feed preemption makes packs ~1 ms wall time) an IRQ is
-// LOST and the software seq counter falls behind - which inverts the
-// seq->ping/pong parity and the TDM TX labeling until the next loss. The
-// frame/burst/chirp-timer counters give the true absolute chirp index; on
-// prompt burst-last entries (counters frozen, unambiguous) seq is checked
-// and resynced. RESYNC counts corrections; OFFSET_* is the self-calibrated
-// hw-index-to-seq offset (OFFSET_VALID: 0 = needs calibration).
+// OFFSET is the self-calibrated hardware-index-to-seq offset
 static RESYNC: AtomicU32 = AtomicU32::new(0);
 static OFFSET: AtomicU32 = AtomicU32::new(0);
 static OFFSET_VALID: AtomicU8 = AtomicU8::new(0);
 static CPB: AtomicUsize = AtomicUsize::new(0);
 static BPF: AtomicUsize = AtomicUsize::new(0);
 
-// Capture geometry, set by `init` before the IRQ is unmasked (read in the ISR).
-// FORMAT code: 1..15 = Sub12(k) kept pairs per block, SUB12_BLOCK_PAIRS (16)
-// = full Packed12, FORMAT_BFP16 (17) = Bfp16.
+// FORMAT codes: 1..15 are Sub12(k), 16 is Packed12, 17 is Bfp16
 const FORMAT_BFP16: u8 = SUB12_BLOCK_PAIRS as u8 + 1;
 static NUM_SAMPLES: AtomicUsize = AtomicUsize::new(0);
 static RX_COUNT: AtomicUsize = AtomicUsize::new(0);
 static FORMAT: AtomicU8 = AtomicU8::new(SUB12_BLOCK_PAIRS as u8);
 
-// Kept-pair indices for the chirp being drained (ISR-only, single producer).
-// Sized for the most pairs a slot can hold: MAX_CHIRP_BYTES / 3 B per pair.
+// sized for the most pairs a slot can hold, at 3 bytes per pair
 struct MaskCell(core::cell::UnsafeCell<[u16; MAX_CHIRP_BYTES / 3]>);
 unsafe impl Sync for MaskCell {}
 static MASK: MaskCell = MaskCell(core::cell::UnsafeCell::new([0; MAX_CHIRP_BYTES / 3]));
@@ -124,16 +100,14 @@ impl Ring {
 
 /// One drained chirp, as handed to the consumer.
 pub struct Chirp {
-    /// Monotonic chirp index since [`init`]; drops show as gaps host-side.
+    /// Monotonic chirp index since [`init`]. Drops show as gaps host-side.
     pub seq: u32,
-    /// Payload length in bytes (see [`payload_bytes`]).
     pub len: usize,
 }
 
-/// Record the capture geometry and unmask the chirp-avail interrupt. Call
-/// after [`sensor::adcbuf_config`], before [`sensor::start`]. `rx_count` is
-/// the number of enabled RX regions (drained contiguously in RX order);
-/// `chirps_per_burst`/`bursts_per_frame` feed the hardware seq resync.
+/// Record the capture geometry and unmask the chirp-avail interrupt. Call after
+/// [`sensor::adcbuf_config`] and before [`sensor::start`]. `chirps_per_burst`
+/// must be even, since ping/pong is selected by chirp parity.
 pub fn init(
     num_adc_samples: u16,
     rx_count: usize,
@@ -161,8 +135,7 @@ pub fn init(
             k
         }
         Format::Bfp16 => {
-            // %64: whole 16-sample blocks and per-RX payload a multiple of
-            // 4 B (17 B/block, so blocks must divide by 4).
+            // 64 gives whole 16-sample blocks and a word-sized per-RX payload
             assert!(num_adc_samples % 64 == 0, "Bfp16 needs samples % 64 == 0");
             FORMAT_BFP16
         }
@@ -181,7 +154,7 @@ pub fn init(
     CPB.store(chirps_per_burst as usize, Ordering::Relaxed);
     BPF.store(bursts_per_frame as usize, Ordering::Relaxed);
     GENERATION.fetch_add(1, Ordering::Relaxed);
-    // Quiesce the producer while the indexes reset (live reconfigure).
+    // quiesce the producer while the indexes reset
     cortex_m::peripheral::NVIC::mask(
         crate::pac::Interrupt::MUXED_FECSS_CHIRP_AVAIL_IRQ_AND_ADC_VALID_START_AND_SYNC_IN,
     );
@@ -195,7 +168,7 @@ pub fn init(
     };
 }
 
-/// `(chirps seen, chirps dropped)` since [`init`].
+/// Report `(chirps seen, chirps dropped)` since [`init`].
 pub fn stats() -> (u32, u32) {
     (
         SEEN.load(Ordering::Relaxed),
@@ -203,15 +176,13 @@ pub fn stats() -> (u32, u32) {
     )
 }
 
-/// Samples that did not fit 12 bits during [`Format::Packed12`] packing.
-/// Nonzero means the stream is corrupt (should never happen: the ADC is
-/// 12-bit).
+/// Count samples that did not fit 12 bits during [`Format::Packed12`] packing.
+/// Nonzero means the stream is corrupt, since the ADC is 12-bit.
 pub fn out_of_range() -> u32 {
     OOR.load(Ordering::Relaxed)
 }
 
-/// `(max ISR duration in 40 MHz ticks, queued-entry count)` since [`init`]
-/// (see the PACK/QUEUED statics).
+/// Report `(max ISR duration in 40 MHz ticks, queued entries)` since [`init`].
 pub fn isr_timing() -> (u32, u32) {
     (
         PACK_MAX_CYC.load(Ordering::Relaxed),
@@ -219,33 +190,33 @@ pub fn isr_timing() -> (u32, u32) {
     )
 }
 
-/// Chirps dropped by the torn-read guard since [`init`] (see TORN).
+/// Count chirps dropped by the torn-read guard since [`init`].
 pub fn torn() -> u32 {
     TORN.load(Ordering::Relaxed)
 }
 
-/// Hardware seq-resync corrections since [`init`] (see RESYNC).
+/// Count hardware seq-resync corrections since [`init`].
 pub fn resyncs() -> u32 {
     RESYNC.load(Ordering::Relaxed)
 }
 
-/// Bumped by every [`init`]; consumers use it to discard batches built for
-/// a previous configuration.
+/// Read the generation counter, bumped by every [`init`], which consumers use
+/// to discard batches built for a previous configuration.
 pub fn generation() -> u32 {
     GENERATION.load(Ordering::Relaxed)
 }
 
-/// Enabled RX regions per chirp (set by [`init`]).
+/// Read the number of enabled RX regions per chirp.
 pub fn rx_count() -> usize {
     RX_COUNT.load(Ordering::Relaxed)
 }
 
-/// ADC samples per chirp per RX (set by [`init`]).
+/// Read the ADC samples per chirp per RX.
 pub fn num_samples() -> usize {
     NUM_SAMPLES.load(Ordering::Relaxed)
 }
 
-/// The encoding chirps are stored/streamed in.
+/// Read the encoding chirps are stored and streamed in.
 pub fn format() -> Format {
     match FORMAT.load(Ordering::Relaxed) {
         FORMAT_BFP16 => Format::Bfp16,
@@ -254,7 +225,7 @@ pub fn format() -> Format {
     }
 }
 
-/// Payload bytes per chirp for a geometry/format (3 B per kept sample pair).
+/// Compute the payload bytes per chirp for a geometry and format.
 pub fn payload_bytes(samples: usize, rx_count: usize, format: Format) -> usize {
     match format {
         Format::Packed12 => rx_count * samples * 3 / 2,
@@ -263,10 +234,10 @@ pub fn payload_bytes(samples: usize, rx_count: usize, format: Format) -> usize {
     }
 }
 
-/// Fill `out` with the kept-pair indices for chirp `seq`: xorshift32 seeded
-/// from `seq` alone; per 16-pair block a partial Fisher-Yates draws `keep`
-/// pairs, emitted ascending. The host mirrors this exactly
-/// (tools/spi_capture.py `mask_indices`) - change both or neither.
+/// Fill `out` with the kept-pair indices for chirp `seq`, drawn per 16-pair
+/// block by a partial Fisher-Yates over an xorshift32 seeded from `seq` alone
+/// and emitted ascending. The host mirrors this exactly in
+/// `tools/spi_capture.py`, so change both or neither.
 fn mask_fill(seq: u32, pairs: usize, keep: usize, out: &mut [u16]) -> usize {
     let mut s = (seq ^ 0xA5A5_5A5A).wrapping_mul(0x9E37_79B9) | 1;
     let mut rng = || {
@@ -291,7 +262,8 @@ fn mask_fill(seq: u32, pairs: usize, keep: usize, out: &mut [u16]) -> usize {
     n
 }
 
-/// Await the next chirp and copy it into `buf` (at least the chirp payload size).
+/// Await the next chirp and copy it into `buf`, which must be at least
+/// [`chirp_len`] bytes.
 pub async fn read_chirp(buf: &mut [u8]) -> Chirp {
     core::future::poll_fn(|cx| match pop_chirp(buf) {
         Some(c) => core::task::Poll::Ready(c),
@@ -303,14 +275,13 @@ pub async fn read_chirp(buf: &mut [u8]) -> Chirp {
     .await
 }
 
-/// Non-blocking pop of the oldest chirp into `buf`; `None` if the ring is empty.
+/// Pop the oldest chirp into `buf` without blocking, or `None` when empty.
 pub fn pop_chirp(buf: &mut [u8]) -> Option<Chirp> {
     if COUNT.load(Ordering::Acquire) == 0 {
         return None;
     }
     let tail = TAIL.load(Ordering::Relaxed);
-    // Safe: single consumer; the producer never touches slots[tail] while
-    // COUNT > 0 says it is ours.
+    // sound because the producer never touches slots[tail] while COUNT > 0
     let slot = unsafe { &(*RING.0.get()).slots[tail] };
     let (seq, len) = (slot.seq, slot.len);
     buf[..len].copy_from_slice(&slot.data[..len]);
@@ -319,18 +290,18 @@ pub fn pop_chirp(buf: &mut [u8]) -> Option<Chirp> {
     Some(Chirp { seq, len })
 }
 
-/// Chirps currently buffered.
+/// Count chirps currently buffered.
 pub fn pending() -> usize {
     COUNT.load(Ordering::Acquire)
 }
 
-/// `true` when the ring is close enough to full that the consumer should
-/// drain it now to avoid drops.
+/// Report whether the ring is full enough that the consumer should drain now to
+/// avoid drops.
 pub fn nearly_full() -> bool {
     COUNT.load(Ordering::Acquire) >= RING_CHIRPS - 4
 }
 
-/// Payload bytes per chirp for the configured geometry and format.
+/// Compute the payload bytes per chirp for the configured geometry and format.
 pub fn chirp_len() -> usize {
     payload_bytes(
         NUM_SAMPLES.load(Ordering::Relaxed),
@@ -339,7 +310,7 @@ pub fn chirp_len() -> usize {
     )
 }
 
-/// Sequence number of the oldest buffered chirp (0 if empty).
+/// Read the sequence number of the oldest buffered chirp, 0 when empty.
 pub fn next_seq() -> u32 {
     if COUNT.load(Ordering::Acquire) == 0 {
         return 0;
@@ -347,10 +318,8 @@ pub fn next_seq() -> u32 {
     unsafe { (*RING.0.get()).slots[TAIL.load(Ordering::Relaxed)].seq }
 }
 
-/// Chirp-available ISR (NVIC IRQ 34): drain the just-finished ping/pong half
-/// into the ring, packing per the configured [`Format`] (~35 us packed for a
-/// 256-sample x 3-RX chirp; Sub12 is cheaper still, it reads only the kept
-/// words). If the ring is full the chirp is dropped and counted.
+/// Drain the just-finished ping/pong half into the ring, packing per the
+/// configured [`Format`]. If the ring is full the chirp is dropped and counted.
 #[unsafe(no_mangle)]
 extern "C" fn MUXED_FECSS_CHIRP_AVAIL_IRQ_AND_ADC_VALID_START_AND_SYNC_IN() {
     let entry = crate::time::ticks_40mhz();
@@ -364,13 +333,10 @@ extern "C" fn MUXED_FECSS_CHIRP_AVAIL_IRQ_AND_ADC_VALID_START_AND_SYNC_IN() {
     if samples == 0 {
         return;
     }
-    // Hardware seq validation (see RESYNC): the NVIC holds only one pended
-    // chirp IRQ, so a >1-chirp-long ISR stretch LOSES an IRQ and seq falls
-    // behind the hardware - inverting ping/pong parity and TX labels for
-    // every following chirp. The frame/burst/chirp counters give the true
-    // absolute index; they are only sampled on prompt entries for the last
-    // chirp of a burst (cc == cpb-1), where all three counters are frozen
-    // until the next burst (>= the burst gap away) and therefore race-free.
+    // the NVIC holds only one pended chirp IRQ, so an ISR stretched past two
+    // chirp completions loses one and seq falls behind, inverting ping/pong
+    // parity and TX labels. the hardware counters give the true absolute index,
+    // sampled only on prompt burst-last entries where all three are frozen
     let cpb = CPB.load(Ordering::Relaxed);
     if prompt && cpb > 0 {
         let cc = sensor::chirp_count();
@@ -382,28 +348,26 @@ extern "C" fn MUXED_FECSS_CHIRP_AVAIL_IRQ_AND_ADC_VALID_START_AND_SYNC_IN() {
                 .wrapping_mul(cpb as u32)
                 .wrapping_add(cc);
             if OFFSET_VALID.load(Ordering::Relaxed) == 0 {
-                // First burst after init: seq is trustworthy, learn the
-                // offset (absorbs whatever epoch the counters start at).
+                // first burst after init, so seq is trustworthy and the offset
+                // absorbs whatever epoch the counters start at
                 OFFSET.store(seq.wrapping_sub(raw), Ordering::Relaxed);
                 OFFSET_VALID.store(1, Ordering::Relaxed);
             } else {
                 let true_seq = raw.wrapping_add(OFFSET.load(Ordering::Relaxed));
                 let d = true_seq.wrapping_sub(seq);
                 if (1..1000).contains(&d) {
-                    // Lost d chirp IRQs somewhere behind us: relabel this
-                    // chirp and resync the counter.
+                    // lost d chirp IRQs behind us, so relabel and resync
                     RESYNC.fetch_add(1, Ordering::Relaxed);
                     seq = true_seq;
                     SEEN.store(true_seq.wrapping_add(1), Ordering::Relaxed);
                 } else if d != 0 {
-                    // Counter epoch changed (frame_cnt wrap / FT restart):
-                    // relearn rather than mislabel.
+                    // counter epoch changed, so relearn rather than mislabel
                     OFFSET.store(seq.wrapping_sub(raw), Ordering::Relaxed);
                 }
             }
         }
     }
-    sensor::adcbuf_view(seq & 1 == 1); // even chirp -> ping, odd -> pong
+    sensor::adcbuf_view(seq & 1 == 1); // even chirps are ping, odd are pong
 
     let fmt = format();
     let per_rx_out = payload_bytes(samples, 1, fmt);
@@ -413,7 +377,7 @@ extern "C" fn MUXED_FECSS_CHIRP_AVAIL_IRQ_AND_ADC_VALID_START_AND_SYNC_IN() {
         WAKER.wake();
         return;
     }
-    // Regenerate the kept-pair mask for this chirp (shared across the RX).
+    // the kept-pair mask is shared across the RX
     let kept = match fmt {
         Format::Sub12(k) => {
             let m = unsafe { &mut *MASK.0.get() };
@@ -422,32 +386,24 @@ extern "C" fn MUXED_FECSS_CHIRP_AVAIL_IRQ_AND_ADC_VALID_START_AND_SYNC_IN() {
         Format::Packed12 | Format::Bfp16 => 0,
     };
     let head = HEAD.load(Ordering::Relaxed);
-    // Safe: single producer; COUNT < RING_CHIRPS means slots[head] is free.
-    // The copy runs with interrupts enabled so the priority-0 SPI feed ISR
-    // can preempt it (a chirp pack takes up to ~70 us; the 20 MHz TX FIFO
-    // underruns after ~50 us).
-    // Torn-read guard: the DFE refills this ping/pong half starting at word
-    // 0 one burst period from now; if word 0 changes across the pack, the
-    // read overlapped the rewrite and the tail of the chirp is a mix of two
-    // chirps. (SPI-feed preemption can stretch this ISR to ~1 ms wall time,
-    // so this occurs on tight burst spacings.)
+    // the pack runs with interrupts enabled so the priority-0 SPI feed ISR can
+    // preempt it, since a pack takes up to ~70 us and the TX FIFO underruns
+    // after ~50 us. the DFE refills this half from word 0, so a word 0 that
+    // changes across the pack means the read overlapped the rewrite
     let guard = unsafe { core::ptr::read_volatile(0x5506_0000 as *const u32) };
     {
         let slot = unsafe { &mut (*RING.0.get()).slots[head] };
         slot.seq = seq;
         slot.len = rx_count * per_rx_out;
         for rx in 0..rx_count {
-            // Volatile word reads out of the ADCBUF window. Read-only: an M4
-            // write to this window raises a FEC access event that asserts the
-            // RFS firmware. Each word holds a sample pair; 3 bytes out per
-            // kept pair.
+            // read-only: an M4 write to this window raises a FEC access event
+            // that asserts the RFS firmware
             let src = (0x5506_0000usize + rx * stride) as *const u32;
             let dst = slot.data[rx * per_rx_out..].as_mut_ptr();
             match fmt {
                 Format::Packed12 => unsafe {
-                    // 8-word block loads: the ADCBUF sits behind the FEC
-                    // bridge at ~70 CPU cycles per single word read; an LDM
-                    // burst amortizes the bridge latency.
+                    // the ADCBUF sits behind the FEC bridge at ~70 cycles per
+                    // single word read, so block loads amortize the latency
                     for b in 0..samples / 16 {
                         let w = core::ptr::read_volatile(src.add(b * 8) as *const [u32; 8]);
                         for (i, &v) in w.iter().enumerate() {
@@ -456,7 +412,7 @@ extern "C" fn MUXED_FECSS_CHIRP_AVAIL_IRQ_AND_ADC_VALID_START_AND_SYNC_IN() {
                     }
                 },
                 Format::Sub12(_) => unsafe {
-                    // Only the kept words are even read from the ADCBUF.
+                    // only the kept words are read from the ADCBUF at all
                     let m = &*MASK.0.get();
                     for (i, &pi) in m[..kept].iter().enumerate() {
                         let v = core::ptr::read_volatile(src.add(pi as usize));
@@ -472,7 +428,7 @@ extern "C" fn MUXED_FECSS_CHIRP_AVAIL_IRQ_AND_ADC_VALID_START_AND_SYNC_IN() {
         }
     }
     if unsafe { core::ptr::read_volatile(0x5506_0000 as *const u32) } != guard {
-        TORN.fetch_add(1, Ordering::Relaxed); // drop: host sees a seq gap
+        TORN.fetch_add(1, Ordering::Relaxed); // dropped, so the host sees a seq gap
     } else {
         HEAD.store((head + 1) % RING_CHIRPS, Ordering::Relaxed);
         COUNT.fetch_add(1, Ordering::Release);
@@ -483,11 +439,10 @@ extern "C" fn MUXED_FECSS_CHIRP_AVAIL_IRQ_AND_ADC_VALID_START_AND_SYNC_IN() {
     PACK_MAX_CYC.fetch_max(exit.wrapping_sub(entry), Ordering::Relaxed);
 }
 
-/// Bfp16-encode one 16-sample block (8 ADCBUF words) into 17 output bytes:
-/// shared shift exponent (0..4, from the block max) + 16 round-to-nearest
-/// int8 mantissas. The words are copied into a local array first so the
-/// slow ADCBUF bus is read exactly once (mirrored bit-exact by the host,
-/// tools/cs_diagnostics.py bfp_quantize / spi_capture.py unpack_bfp).
+/// Bfp16-encode one 16-sample block into 17 output bytes, a shared shift
+/// exponent from the block max plus 16 round-to-nearest int8 mantissas. The
+/// words are copied locally first so the slow ADCBUF bus is read exactly once.
+/// The host mirrors this bit-exact in `tools/spi_capture.py`.
 #[inline(always)]
 unsafe fn pack_block_bfp(src: *const u32, dst: *mut u8) {
     let w = unsafe { core::ptr::read_volatile(src as *const [u32; 8]) };
@@ -511,7 +466,7 @@ unsafe fn pack_block_bfp(src: *const u32, dst: *mut u8) {
     }
 }
 
-/// Pack a sample-pair word into 3 output bytes, counting 12-bit overflow.
+/// Pack one sample-pair word into 3 output bytes, counting 12-bit overflow.
 #[inline(always)]
 unsafe fn pack_pair(v: u32, p: *mut u8) {
     let s0 = v as u16;

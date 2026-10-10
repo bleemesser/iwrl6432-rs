@@ -4,11 +4,8 @@
 __pycache__/
 .venv/
 /appimage/
-# Markdown stays local except READMEs (docs/, CLAUDE.md, memory notes...).
 *.md
 !README.md
-# TI-licensed files fetched by the user (see README.md "TI files" section).
-# Everything under ti/ is ignored except our README.md.
 /ti/**
 !/ti/README.md
 

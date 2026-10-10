@@ -1,12 +1,12 @@
 [package]
 name = "xwrl64xx-pac"
 version = "0.6.0"
-authors = ["Abram Haich"]
+authors = ["Abram Haich", "bleemesser"]
 edition = "2018"
-homepage = "https://github.com/abeanater/xwrl64xx-pac"
+homepage = "https://github.com/bleemesser/iwrl6432-rs"
 description = "Owned PAC for the TI xWRL64xx, forked from abeanater/xwrl64xx-pac and extended with an interrupt vector table"
 license = "MIT"
-repository = "https://github.com/abeanater/xwrl64xx-pac"
+repository = "https://github.com/bleemesser/iwrl6432-rs"
 
 # no_std target has no `test` crate; keep --all-targets (rust-analyzer flycheck) buildable
 [lib]

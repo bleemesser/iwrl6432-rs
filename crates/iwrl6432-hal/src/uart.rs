@@ -64,13 +64,13 @@ macro_rules! sci_uart {
                 unsafe { core::ptr::write_volatile((BASE + off) as *mut u32, v) };
             }
 
-            /// Zero-sized handle; state lives in hardware and module statics.
+            /// Zero-sized handle. State lives in hardware and module statics.
             #[derive(Clone, Copy)]
             pub struct Uart;
 
             impl Uart {
-                /// Bring the UART up for 8N1 at `baud` (functional clock =
-                /// [`clock::UART_CLK_HZ`]).
+                /// Bring the UART up for 8N1 at `baud`, off
+                /// [`clock::UART_CLK_HZ`].
                 pub fn new(dp: &pac::Peripherals, baud: u32) -> Self {
                     $enable_clock(dp);
                     pinmux::configure(dp, $tx_pad, pinmux::pad_cfg($tx_mode));
@@ -88,16 +88,15 @@ macro_rules! sci_uart {
                     Uart
                 }
 
-                /// `SCIBAUD = round(clk / (16 * baud)) - 1`.
+                /// Set `SCIBAUD` to `round(clk / (16 * baud))` minus one.
                 pub fn set_baud(input_clk: u32, baud: u32) {
                     let step = baud * 16;
                     wr(SCIBAUD, (input_clk + step / 2) / step - 1);
                 }
 
                 /// Enable the RX interrupt and unmask the port's NVIC line.
-                /// Requires global interrupts enabled (flash boots must call
-                /// [`crate::normalize_after_bootloader`] first: the ROM leaves
-                /// FAULTMASK set).
+                /// Requires global interrupts enabled, so flash boots must call
+                /// [`crate::normalize_after_bootloader`] first.
                 pub fn enable_interrupts() {
                     wr(SCISETINT, INT_RX);
                     unsafe { cortex_m::peripheral::NVIC::unmask(pac::Interrupt::$irq) };
@@ -111,11 +110,9 @@ macro_rules! sci_uart {
                 }
             }
 
-            /// Push one byte and enable the TX interrupt atomically (same
-            /// critical section as the ISR's pop/disable). The SCI TX
-            /// interrupt is edge-triggered on TXRDY: if the transmitter is
-            /// idle there is no edge, so pend the ISR to prime the pump;
-            /// without this the first send after boot deadlocks.
+            /// Push one byte and enable the TX interrupt atomically. The TX
+            /// interrupt is edge-triggered on TXRDY, so an idle transmitter
+            /// produces no edge and the ISR is pended to prime the pump.
             #[inline]
             fn push_tx(c: u8) -> bool {
                 critical_section::with(|cs| {
@@ -155,7 +152,7 @@ macro_rules! sci_uart {
             }
 
             impl core::fmt::Write for Uart {
-                /// Blocking, buffered; expands `\n` to `\r\n`.
+                /// Write blocking and buffered, expanding `\n` to `\r\n`.
                 fn write_str(&mut self, s: &str) -> core::fmt::Result {
                     for b in s.bytes() {
                         if b == b'\n' {
@@ -213,8 +210,8 @@ macro_rules! sci_uart {
                     RX_WAKER.wake();
                 }
                 if flr & FLR_TXRDY != 0 {
-                    // Pop and (on empty) disable the TX IRQ atomically, so a
-                    // concurrent push can't be stranded with TX disabled.
+                    // pop and disable atomically, so a concurrent push is never
+                    // stranded with TX disabled
                     critical_section::with(|cs| {
                         match TX_FIFO.borrow(cs).borrow_mut().pop_front() {
                             Some(b) => wr(SCITD, b as u32),
@@ -229,7 +226,8 @@ macro_rules! sci_uart {
 }
 
 sci_uart!(
-    /// Console port: UARTB (UART1), the [`print!`]/[`println!`] target.
+    /// Console port on UARTB, the [`print!`] and [`println!`] target. This is
+    /// the XDS110 backchannel on the BOOST. UARTA is unused.
     console,
     base = 0x57F7_F000,
     irq = APPSS_SCI2_INT0,

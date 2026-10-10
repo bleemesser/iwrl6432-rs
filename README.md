@@ -148,7 +148,7 @@ cd tools
 uv run cs_reconstruct.py
 ```
 
-The protocol is documented in `crates/iwrl6432-fw/src/stream.rs`. The stream is
+The protocol is implemented in `crates/iwrl6432-fw/src/stream.rs`. The stream is
 self-describing: an `A55E` metadata frame (~1/s) carries the sample count, RX,
 format and RF params, so the host tools label axes in meters/m·s without being
 told the profile.
@@ -175,22 +175,27 @@ stream in real time.
 
 ## License
 
-MIT — see `LICENSE`.
+MIT, see [LICENSE](LICENSE).
 
-`crates/xwrl64xx-pac/` is derived from
-[`abeanater/xwrl64xx-pac`](https://github.com/abeanater/xwrl64xx-pac), also MIT;
-its upstream license is kept at `crates/xwrl64xx-pac/LICENSE`. Its interrupt
+`crates/xwrl64xx-pac/` is a fork of
+[`abeanater/xwrl64xx-pac`](https://github.com/abeanater/xwrl64xx-pac) and keeps
+its own MIT license and copyright notice at
+[`crates/xwrl64xx-pac/LICENSE`](crates/xwrl64xx-pac/LICENSE). Its register
+addresses and field layouts come from TI's public targetdb XML. Its interrupt
 vector table is derived from `cslr_intr.h` in the TI MMWAVE-L-SDK, which is
-BSD-3-Clause. TI's notice is kept at `crates/xwrl64xx-pac/LICENSE-TI`.
+BSD-3-Clause. TI's notice is kept at
+[`crates/xwrl64xx-pac/LICENSE-TI`](crates/xwrl64xx-pac/LICENSE-TI).
 
 The register and mailbox sequences in this firmware were worked out by
-reading the BSD-3-Clause source of the MMWAVE-L-SDK and by comparing register
-state against TI's demo while it ran under JTAG. No TI code is copied into
-this repository. The RFS patch firmware is used as-is and was not
-disassembled or decompiled.
+reading the BSD-3-Clause source of the MMWAVE-L-SDK and its documentation, and
+by comparing register state against TI's demo while it ran under JTAG. No TI
+code is copied into this repository. The RFS patch firmware is used as-is and
+was not disassembled or decompiled.
 
 The files under `ti/` (SDK tooling, GEL scripts, the RFS patch binary,
-`ccs_base`) are fetched by the user from TI and are git-ignored. See the
-"TI files" section above. A built `fw.appimage` contains the RFS patch, which
-is under TI's own license (use only with TI devices). Anyone who
+`ccs_base`) are fetched by the user from TI and are git-ignored. See
+[`ti/README.md`](ti/README.md). A built `fw.appimage` contains the RFS patch,
+which is under TI's own license (use only with TI devices). Anyone who
 redistributes an appimage must include that license.
+
+This project is not affiliated with or endorsed by Texas Instruments.

@@ -5,20 +5,18 @@ use iwrl6432_hal::{capture, fecss, mcspi, print, println, radar, sensor, uart};
 
 use crate::profiles::{self, Metrics};
 
-/// RFS booted + calibrated (full radar::start ran once). Set by main on
-/// auto-start; later starts then only reconfigure.
+/// Set once [`radar::start`] has run, after which starts only reconfigure.
 pub static BOOTED: AtomicBool = AtomicBool::new(false);
 static RUNNING: AtomicBool = AtomicBool::new(false);
-/// Periodic `[radar] ...` status line. Off by default so it doesn't clobber
-/// the interactive prompt; toggle with the `log` command.
+/// Periodic status line, off by default so it does not clobber the prompt.
 pub static LOG: AtomicBool = AtomicBool::new(false);
 
-// Name of the active profile and the staged custom config.
 static ACTIVE: critical_section::Mutex<core::cell::Cell<&'static str>> =
     critical_section::Mutex::new(core::cell::Cell::new("-"));
 static CUSTOM: critical_section::Mutex<core::cell::RefCell<Option<sensor::RadarConfig>>> =
     critical_section::Mutex::new(core::cell::RefCell::new(None));
 
+/// Record that `name` is now the running profile.
 pub fn note_started(name: &'static str) {
     BOOTED.store(true, Ordering::Relaxed);
     RUNNING.store(true, Ordering::Relaxed);
@@ -34,6 +32,7 @@ fn custom_cfg() -> sensor::RadarConfig {
     })
 }
 
+/// Run the line-based console CLI.
 #[embassy_executor::task]
 pub async fn cli_task() {
     let mut buf = [0u8; 96];
@@ -235,8 +234,7 @@ fn status() {
     );
 }
 
-// Interrupt-plumbing diag: live NVIC priority + enable for the IRQs the SPI
-// feed margin depends on (14 must outrank the rest or the feed underruns).
+// irq 14 must outrank the rest or the SPI feed underruns
 fn nvic() {
     for irq in [14u8, 34, 43, 62] {
         let pri = unsafe { core::ptr::read_volatile((0xE000_E400 + irq as usize) as *const u8) };
@@ -283,7 +281,7 @@ async fn start(arg: Option<&str>) {
         println!("no profile '{}' (see 'profiles')", name);
         return;
     };
-    // Mirror capture::init's asserts (those panic; report politely instead).
+    // mirror capture::init's asserts, which panic rather than report
     let samples = cfg.common.num_adc_samples as usize;
     let pair_mod = match cfg.capture_format {
         capture::Format::Packed12 => 2,
@@ -313,7 +311,7 @@ async fn start(arg: Option<&str>) {
     } else {
         radar::start(&cfg).map(Some)
     };
-    // reconfigure blocks ~80 ms in a delay loop; yield once for the ISRs.
+    // reconfigure blocks ~80 ms in a delay loop, so yield once for the ISRs
     Timer::after_millis(1).await;
     match res {
         Ok(report) => {
@@ -394,7 +392,7 @@ fn set(field: Option<&str>, val: Option<&str>) {
         println!("value out of range");
         return;
     }
-    // Keep the CRD slope consistent with the profile formula.
+    // keep the CRD slope consistent with the profile formula
     let ramp_us = cfg.common.ramp_end_time as f32 / 10.0;
     let slope_mhz = cfg.timing.freq_slope as f32 * 0.02861;
     let idle_us = cfg.timing.idle_time as f32 / 10.0;

@@ -11,7 +11,8 @@ const KICK1_UNLOCK: u32 = 0x95A4_F1E0;
 /// `PADxx_CFG_REG.PIN_PULL_DISABLE` (bit 8).
 pub const PIN_PULL_DISABLE: u32 = 1 << 8;
 
-/// A device pad, named for its `PAD_Ax` ball (`PADAA` = index 0).
+/// A device pad, named for its `PAD_Ax` ball. The `PADxx_CFG_REG` registers are
+/// a contiguous u32 array from `PADAA`, so the discriminant is the index.
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Pad {
@@ -47,7 +48,8 @@ pub const fn pad_cfg(mode: u32) -> u32 {
     mode | PIN_PULL_DISABLE
 }
 
-/// Write `value` to a pad's `PADxx_CFG_REG` (handles the KICK unlock/relock).
+/// Write `value` to a pad's `PADxx_CFG_REG`. Writes are ignored unless the two
+/// KICK registers hold the unlock magics, so all writes must go through here.
 pub fn configure(dp: &pac::Peripherals, pad: Pad, value: u32) {
     let reg = (base() + (pad as usize) * 4) as *mut u32;
     dp.top_io_mux

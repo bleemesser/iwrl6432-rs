@@ -1,5 +1,6 @@
 use iwrl6432_hal::sensor::{ChirpCommon, ChirpTiming, FrameCfg, RadarConfig, Resolution};
 
+/// A named preset radar configuration.
 pub struct Profile {
     pub name: &'static str,
     /// One-line summary for the `profiles` listing.
@@ -13,8 +14,9 @@ pub struct Profile {
 /// wait for a CLI `start`.
 pub const AUTO_START: Option<&str> = Some("standard");
 
-/// LSB units: ramp/idle/burst 100 ns, frame 25 ns, slope ~28.61 kHz/us,
-/// freq 0xBE00=57 GHz..0xD555=64 GHz.
+/// Build a config from the shared base: coarse resolution, 3 RX, both TX and
+/// continuous frames. LSBs are 100 ns for ramp/idle/burst, 25 ns for frame,
+/// ~28.61 kHz/us for slope, and 0xBE00 to 0xD555 spans 57 to 64 GHz.
 fn cfg(
     samples: u16,
     rate_code: u8, // f_s = 100/code MSPS
@@ -26,7 +28,7 @@ fn cfg(
     burst_period: u32, // 100 ns LSB
     frame_period: u32, // 25 ns LSB
 ) -> RadarConfig {
-    // mmw_cli formula: 2.1845 * (ramp_us * slope_MHz_us) / min(idle_us - 1, 6)
+    // 2.1845 * ramp_us * slope_mhz_us, over min(idle_us minus 1, 6)
     let ramp_us = ramp as f32 / 10.0;
     let slope_mhz = slope as f32 * 0.02861;
     let idle_us = idle as f32 / 10.0;
@@ -46,9 +48,7 @@ fn cfg(
             out_bits_sel: 0, // 12-bit round
             fir_sel: 0,      // long FIR
             num_adc_samples: samples,
-            // TDMA-2TX: the chirp timer fires TX0 on even chirps, TX1 on odd,
-            // so consecutive chirps form the 6-ch virtual array the host uses
-            // for angle. chirps_per_burst stays even (ping/pong parity holds).
+            // TDMA-2TX, so chirps_per_burst must stay even to hold ping/pong parity
             mimo_pattern: 1,
             ramp_end_time: ramp,
             rx_hpf_sel: 1, // 350 kHz
@@ -78,16 +78,16 @@ fn cfg(
     }
 }
 
+/// List every preset profile.
 pub fn profiles() -> [Profile; 8] {
     [
-        // Raw Packed12: host decodes samples directly, no reconstruction.
         Profile {
             name: "standard",
             summary: "packed12 | 512 samp, 1.6 GHz sweep, 9 cm bins, 600 chirps/s",
             detail: "Balanced default: 9 cm range bins AND fine Doppler \
                      (0.21 m/s, 12 ms coherent window) at 600 chirps/s, \
                      ~1.4 MB/s wire (within the ~1.7 MB/s link). 25 fps.",
-            // 512 @ 12.5M, 40.0 MHz/us (1398 LSB), 45 us ramp; 2x12 @1 ms, 25 fps
+            // 512 @ 12.5M, 40.0 MHz/us (1398 LSB), 45 us ramp, 2x12 @1 ms, 25 fps
             cfg: cfg(512, 8, 1398, 450, 500, 2, 12, 10_000, 1_600_000),
         },
         Profile {
@@ -96,11 +96,9 @@ pub fn profiles() -> [Profile; 8] {
             detail: "Short chirps at 500 us burst spacing: the highest chirp \
                      rate and velocity ceiling, for micro-Doppler. Coarse 18 cm \
                      range bins (short sweep), 50 fps refresh.",
-            // 128 @ 6.25M (code 16), 40.0 MHz/us, 25 us ramp; 2x16 @0.5 ms, 50 fps
+            // 128 @ 6.25M (code 16), 40.0 MHz/us, 25 us ramp, 2x16 @0.5 ms, 50 fps
             cfg: cfg(128, 16, 1398, 250, 300, 2, 16, 5_000, 800_000),
         },
-        // Over the raw-link ceiling at 1024 samples: bfp16 is semi-lossless
-        // (1.41x smaller than packed12) and needs no host reconstruction.
         Profile {
             name: "imaging",
             summary: "bfp16 | 1024 samp, 3.3 GHz sweep, 4.6 cm bins",
@@ -111,8 +109,8 @@ pub fn profiles() -> [Profile; 8] {
                      ~1.1 ms wall time under SPI load, and tighter bursts \
                      lose chirp IRQs / skip bursts (HW-verified; see the \
                      status resync counter).",
-            // 1024 @ 12.5M, 40.0 MHz/us, 90 us ramp; 2x8 @3 ms, 25 fps.
-            // Start ~58.4 GHz so the 3.3 GHz sweep stays in-band.
+            // 1024 @ 12.5M, 40.0 MHz/us, 90 us ramp, 2x8 @3 ms, 25 fps.
+            // start ~58.4 GHz so the 3.3 GHz sweep stays in-band
             cfg: {
                 let mut c = cfg(1024, 8, 1398, 900, 60, 2, 8, 30_000, 1_600_000);
                 c.timing.freq_start = 0xC2AA;
@@ -127,8 +125,8 @@ pub fn profiles() -> [Profile; 8] {
                      SNR), ~1.04 MB/s wire. keep is capped by the RFS, not \
                      the link (~1.7 MB/s): at keep 7 it skips one burst per \
                      frame under streaming load. 400 chirps/s, 25 fps.",
-            // 1536 @ 12.5M, 40.7 MHz/us (1422 LSB), 130 us ramp; 2x8 @1 ms, 25 fps.
-            // Start 58 GHz (0xC155); 5 GHz sweep ends ~63 GHz, in-band.
+            // 1536 @ 12.5M, 40.7 MHz/us (1422 LSB), 130 us ramp, 2x8 @1 ms, 25 fps.
+            // start 58 GHz, so the 5 GHz sweep ends ~63 GHz and stays in-band
             cfg: {
                 let mut c = cfg(1536, 8, 1422, 1300, 60, 2, 8, 10_000, 1_600_000);
                 c.timing.freq_start = 0xC155;
@@ -142,8 +140,8 @@ pub fn profiles() -> [Profile; 8] {
             detail: "Range-resolution floor: 2.1 cm bins from the full 7 GHz \
                      band (57-64 GHz). Max sample count caps keep at 4/16 \
                      (-6 dB SNR). 400 chirps/s, 25 fps.",
-            // 2048 @ 12.5M, 42.7 MHz/us (1493 LSB), 170 us ramp; 2x8 @1 ms, 25 fps.
-            // Start 57 GHz (0xBE00), full-band sweep to 64 GHz.
+            // 2048 @ 12.5M, 42.7 MHz/us (1493 LSB), 170 us ramp, 2x8 @1 ms, 25 fps.
+            // start 57 GHz, full-band sweep to 64 GHz
             cfg: {
                 let mut c = cfg(2048, 8, 1493, 1700, 60, 2, 8, 10_000, 1_600_000);
                 c.timing.freq_start = 0xBE00;
@@ -151,9 +149,6 @@ pub fn profiles() -> [Profile; 8] {
                 c
             },
         },
-        // Exact at 10 fps: standard's geometry, the slower refresh spent on
-        // 30 bursts/frame -> a 30 ms coherent window and the finest velocity
-        // resolution of any exact profile. Same 600 chirps/s and wire rate.
         Profile {
             name: "deep_std",
             summary: "packed12 | 512 samp, 9 cm bins, 0.083 m/s v_res, 10 fps",
@@ -161,19 +156,16 @@ pub fn profiles() -> [Profile; 8] {
                      chirps/s, but 30 bursts per frame give a 30 ms coherent \
                      window - 2.5x finer velocity resolution (0.083 m/s) for \
                      slow micro-motion (bed-scale monitoring). ~1.4 MB/s wire.",
-            // 512 @ 12.5M, 40.0 MHz/us, 45 us ramp, 50 us idle; 2x30 @1 ms, 10 fps
+            // 512 @ 12.5M, 40.0 MHz/us, 45 us ramp, 50 us idle, 2x30 @1 ms, 10 fps
             cfg: cfg(512, 8, 1398, 450, 500, 2, 30, 10_000, 4_000_000),
         },
-        // Sub12 at 10 fps: range/sweep already maxed, so the slow refresh buys
-        // 24 bursts/frame (vs 8) for a ~3x longer coherent window and much
-        // finer velocity resolution; host must run tools/cs_reconstruct.py.
         Profile {
             name: "deep_range",
             summary: "sub12 4/16 | 2048 samp, 7 GHz, 2.1 cm bins, 10 fps",
             detail: "maxres slowed to 10 fps: same 2.1 cm bins, but 24 bursts \
                      per frame give a ~24 ms coherent window and the finest \
                      velocity resolution. 480 chirps/s, keep 4/16 (-6 dB SNR).",
-            // 2048 @ 12.5M, 42.7 MHz/us, 170 us ramp; 2x24 @1 ms, 10 fps.
+            // 2048 @ 12.5M, 42.7 MHz/us, 170 us ramp, 2x24 @1 ms, 10 fps.
             cfg: {
                 let mut c = cfg(2048, 8, 1493, 1700, 60, 2, 24, 10_000, 4_000_000);
                 c.timing.freq_start = 0xBE00;
@@ -187,7 +179,7 @@ pub fn profiles() -> [Profile; 8] {
             detail: "hires slowed to 10 fps: 3.0 cm bins, 24 bursts per frame \
                      for the same fine velocity resolution at better SNR than \
                      deep_range. 480 chirps/s, keep 5/16 (-5 dB SNR).",
-            // 1536 @ 12.5M, 40.7 MHz/us, 130 us ramp; 2x24 @1 ms, 10 fps.
+            // 1536 @ 12.5M, 40.7 MHz/us, 130 us ramp, 2x24 @1 ms, 10 fps.
             cfg: {
                 let mut c = cfg(1536, 8, 1422, 1300, 60, 2, 24, 10_000, 4_000_000);
                 c.timing.freq_start = 0xC155;
@@ -198,6 +190,7 @@ pub fn profiles() -> [Profile; 8] {
     ]
 }
 
+/// Look up a preset profile by name.
 pub fn find(name: &str) -> Option<Profile> {
     profiles().into_iter().find(|p| p.name == name)
 }
@@ -216,6 +209,7 @@ pub struct Metrics {
     pub fps: f32,
 }
 
+/// Derive the [`Metrics`] a config implies.
 pub fn metrics(c: &RadarConfig) -> Metrics {
     const C_LIGHT: f32 = 3.0e8;
     const LAMBDA_M: f32 = 4.96e-3; // ~60.5 GHz
@@ -225,7 +219,7 @@ pub fn metrics(c: &RadarConfig) -> Metrics {
     let sweep = slope * sampling_us; // MHz
     let range_res = C_LIGHT / (2.0 * sweep * 1.0e6);
     let max_range = (fs / 2.0) * C_LIGHT / (2.0 * slope * 1.0e12) * 1.0e6;
-    // Doppler across bursts (TDM-style): repetition = burst period.
+    // Doppler is measured across bursts, so repetition is the burst period
     let t_rep_s = c.frame.burst_periodicity as f32 * 100.0e-9;
     let coherent_s = c.frame.bursts_per_frame as f32 * t_rep_s;
     let per_frame = c.frame.chirps_per_burst as u32 * c.frame.bursts_per_frame as u32;

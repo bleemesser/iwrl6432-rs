@@ -37,7 +37,7 @@ embassy_time_driver::time_driver_impl!(
 
 impl RtiDriver {
     /// Arm compare-0 for absolute tick `at`. Returns `false` if `at` is already
-    /// past (caller re-drains); `true` if armed, or if `at == u64::MAX` (disarm).
+    /// past and the caller re-drains. True if armed, or if `at` is `u64::MAX`.
     fn set_alarm(&self, at: u64) -> bool {
         let r = rti();
         if at == u64::MAX {
@@ -51,10 +51,9 @@ impl RtiDriver {
     }
 }
 
-/// Monotonic 40 MHz timestamp (25 ns ticks) from FRC0 (1 kHz) + the UC0
-/// prescale counter, for ISR-duration diagnostics (the M4's DWT CYCCNT is
-/// not implemented, DWT_CTRL.NOCYCCNT=1). Truncated to u32: wraps every
-/// ~107 s, fine for interval math.
+/// Read a monotonic 40 MHz timestamp (25 ns ticks) for ISR-duration
+/// diagnostics, since this M4 does not implement DWT CYCCNT. Wraps every
+/// ~107 s, so it is only good for interval math.
 pub fn ticks_40mhz() -> u32 {
     let r = rti();
     loop {
@@ -84,7 +83,8 @@ impl Driver for RtiDriver {
     }
 }
 
-/// Configure and start the tickless RTI timer. Call once, after clocks are up.
+/// Configure and start the tickless RTI time driver. Call once, after clocks
+/// are up. `RTIFRC0` is 32-bit, so `now()` wraps after ~49.7 days.
 pub fn init(dp: &pac::Peripherals) {
     clock::enable_rti(dp);
 
@@ -93,7 +93,7 @@ pub fn init(dp: &pac::Peripherals) {
     r.rtiuc0().write(|w| unsafe { w.bits(0) });
     r.rtifrc0().write(|w| unsafe { w.bits(0) });
     r.rticpuc0().write(|w| unsafe { w.bits(RTICPUC0) });
-    r.rticompctrl().write(|w| unsafe { w.bits(0) }); // COMP0 compares against FRC0
+    r.rticompctrl().write(|w| unsafe { w.bits(0) }); // compare COMP0 against FRC0
     r.rtiudcp0().write(|w| unsafe { w.bits(0) }); // one-shot (no periodic auto-add)
     r.rtiintflag().write(|w| unsafe { w.bits(0xF) });
     r.rticlearint().write(|w| unsafe { w.bits(0xF) }); // no alarm armed yet

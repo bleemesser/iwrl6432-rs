@@ -12,7 +12,6 @@ use iwrl6432_hal::{self as hal, capture, fecss, mcspi, println, radar, sensor, u
 use panic_halt as _;
 use static_cell::StaticCell;
 
-/// Console rate. CLI-only (data goes out over SPI).
 const BAUD: u32 = 115_200;
 
 static EXECUTOR: StaticCell<Executor> = StaticCell::new();
@@ -41,7 +40,7 @@ async fn radar_status() {
     }
 }
 
-/// Full cold bring-up into the auto-start profile (if configured).
+/// Bring the radar up into [`profiles::AUTO_START`], if one is configured.
 fn radar_bringup() {
     let Some(name) = profiles::AUTO_START else {
         println!("radar: idle (no auto-start profile; 'start <name>' on the CLI)");
@@ -76,8 +75,6 @@ fn radar_bringup() {
 
 #[entry]
 fn main() -> ! {
-    // Must run first on flash boots: the ROM bootloader leaves FAULTMASK set,
-    // trap bits on, and stray NVIC state (harmless under JTAG, fatal without).
     hal::normalize_after_bootloader();
 
     let dp = unsafe { hal::pac::Peripherals::steal() };

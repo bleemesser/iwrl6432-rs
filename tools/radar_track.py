@@ -1,7 +1,7 @@
 """Clustering + multi-object tracking for the scope's CFAR detections.
 
-Ported from ~/code/ti-mmwave/examples/cluster.py (which consumed the TI
-demo's pregenned point clouds), adapted for this pipeline's sparser clouds:
+Ported from an earlier clustering script that consumed the TI demo's
+pregenned point clouds, adapted for this pipeline's sparser clouds:
 - fixed PHYSICAL clustering scales (meters / m/s) instead of a per-frame
   StandardScaler, which is unstable when a frame has only a few points;
 - hand-rolled O(n^2) DBSCAN (n is tens at most; drops the sklearn dep);

@@ -11,7 +11,7 @@ const TX_MASK: u16 = 0x3;
 #[derive(Clone, Copy, Debug)]
 pub enum BringupError {
     Power(fecss::PowerError),
-    /// RFS M3 didn't report boot Pass; carries what it did report.
+    /// RFS M3 did not report boot Pass, carrying what it did report.
     RfsBoot(fecss::BootStatus),
     Mailbox {
         stage: &'static str,
@@ -26,8 +26,7 @@ pub enum BringupError {
 
 /// Calibration + temperature results from a successful [`start`].
 pub struct BringupReport {
-    /// Success = `run_status == `[`fecss::CAL_MASK_COLDBOOT`], `res_status`
-    /// carrying the validity bits (0xEF on this board).
+    /// Successful when `run_status` equals [`fecss::CAL_MASK_COLDBOOT`].
     pub fact_cal: fecss::CalStatus,
     pub runtime_cal: fecss::CalStatus,
     pub temp: Option<fecss::TempMeas>,
@@ -39,34 +38,31 @@ fn mb<T>(stage: &'static str, r: Result<T, fecss::MailboxError>) -> Result<T, Br
     r.map_err(|err| BringupError::Mailbox { stage, err })
 }
 
-/// Full cold-to-streaming bring-up, in the SDK's cold-boot order: FECSS power
-/// on -> frame timer stop+reset (an RFS booted over a running frame timer
-/// wedges) -> RFS boot -> RF power -> chirp/frame config -> APLL -> factory +
-/// runtime cal -> ADCBUF + [`capture::init`] -> frame start.
+/// Run the full cold bring-up. On success chirps land in the [`capture`] ring
+/// and [`sensor::frame_count`] climbs. Takes ~100 ms, mostly calibration.
 ///
-/// On success chirps land in the [`capture`] ring and [`sensor::frame_count`]
-/// climbs. Caller must have run [`crate::clock::init_core`],
-/// [`crate::clock::enable_hwass`] and (on flash boots)
-/// [`crate::normalize_after_bootloader`]. Takes ~100 ms, mostly calibration.
+/// Caller must have run [`crate::clock::init_core`],
+/// [`crate::clock::enable_hwass`] and, on flash boots,
+/// [`crate::normalize_after_bootloader`].
 pub fn start(cfg: &sensor::RadarConfig) -> Result<BringupReport, BringupError> {
     fecss::power_on().map_err(BringupError::Power)?;
     sensor::stop();
     sensor::reset();
 
+    // an RFS booted over a running frame timer wedges, hence the stop and reset above
     let bs = fecss::rfs_boot();
     if bs != fecss::BootStatus::Pass {
         return Err(BringupError::RfsBoot(bs));
     }
 
-    // Config must be programmed before the RFS does per-frame analog setup.
+    // config must be programmed before the RFS does per-frame analog setup
     mb("rf_pwr_onoff", fecss::rf_pwr_onoff(RX_MASK, TX_MASK, 0))?;
     sensor::configure(cfg).map_err(BringupError::Config)?;
     mb("apll_on", fecss::apll_on())?;
     let fact_cal = mb("fact_cal", fecss::fact_cal())?;
 
-    // Temperatures are valid now (RF analog + APLL up); pick the cal bin from
-    // the RX0/TX0/PM average, falling back to a room-temperature bin.
-    fecss::temp_config(0x311); // RX + TX + PM + DIG sensors
+    // temperatures only read valid once RF analog and the APLL are up
+    fecss::temp_config(0x311); // RX, TX, PM and DIG sensors
     let temp = fecss::temp_trig().ok();
     let temp_c = temp
         .as_ref()
@@ -90,7 +86,7 @@ pub fn start(cfg: &sensor::RadarConfig) -> Result<BringupReport, BringupError> {
     );
 
     sensor::start(sensor::FrameTrigMode::SwImmediate);
-    // The FT latches the start key within a frame period.
+    // the frame timer latches the start key within a frame period
     for _ in 0..200 {
         if sensor::start_honored() {
             return Ok(BringupReport {
@@ -110,15 +106,12 @@ pub fn stop() {
     sensor::stop();
 }
 
-/// Reconfigure a radar that [`start`] already brought up (RFS booted, RF
-/// powered, calibrated): stop + reset the frame timer, push the new
-/// chirp/frame config over the mailbox, re-init the ADCBUF + capture ring,
-/// restart frames. Calibration is not re-run (the cal is per-band, not
-/// per-profile).
+/// Retune a radar that [`start`] already brought up. Calibration is not re-run,
+/// since it is per-band rather than per-profile.
 pub fn reconfigure(cfg: &sensor::RadarConfig) -> Result<(), BringupError> {
     sensor::stop();
-    // The stop key latches at the next frame boundary; wait out a worst-case
-    // frame period (profiles stay <= 50 ms) before resetting the FT.
+    // the stop key latches at the next frame boundary, so wait out a
+    // worst-case frame period (profiles stay under 50 ms) before resetting
     asm::delay(crate::clock::CORE_CLK_HZ / 1_000 * 80);
     sensor::reset();
     sensor::configure(cfg).map_err(BringupError::Config)?;
